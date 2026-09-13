@@ -282,7 +282,7 @@ namespace USBAutoCopy
 
         private void InitializeComponent()
         {
-            this.Text = "获取Rick课件 v2.5";
+            this.Text = "获取Rick课件 v2.5.1";
             this.Size = new Size(700, 660);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormClosing += MainForm_FormClosing;
