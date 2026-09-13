@@ -25,20 +25,26 @@ jobs:
     - name: Build
       run: dotnet build --configuration Release --no-restore
       
-    - name: Publish
-      run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o ./publish
+    - name: Publish Windows (Self-contained)
+      run: |
+        dotnet publish RickCourseware.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
+        copy "publish\获取Rick课件.exe" "publish\Rick.exe"
       
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: Get-Rick-Courseware
-        path: ./publish/获取Rick课件.exe
+        path: |
+          ./publish/Rick.exe
+          ./publish/获取Rick课件.exe
         
     - name: Create Release
       uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        files: ./publish/获取Rick课件.exe
+        files: |
+          ./publish/Rick.exe
+          ./publish/获取Rick课件.exe
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
