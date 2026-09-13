@@ -7,6 +7,7 @@ using System.Management;
 using System.Threading;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.Text;
 
 namespace USBAutoCopy
 {
@@ -315,24 +316,58 @@ namespace USBAutoCopy
             }
         }
 
+#if WINDOWS
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetVolumeInformationW(
+            string lpRootPathName,
+            StringBuilder lpVolumeNameBuffer,
+            uint nVolumeNameSize,
+            out uint lpVolumeSerialNumber,
+            out uint lpMaximumComponentLength,
+            out uint lpFileSystemFlags,
+            StringBuilder lpFileSystemNameBuffer,
+            uint nFileSystemNameSize);
+#endif
+
         public static string GetVolumeSerial(string driveLetter)
         {
 #if WINDOWS
-            try
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                string drive = driveLetter.TrimEnd('\\', '/');
-                if (!drive.EndsWith(":")) drive += ":";
-                using (var searcher = new ManagementObjectSearcher(
-                    $"SELECT VolumeSerialNumber FROM Win32_LogicalDisk WHERE DeviceID='{drive}'"))
+                // 优先使用 Win32 原生 API，极速且不依赖 WMI 服务
+                try
                 {
-                    foreach (ManagementObject obj in searcher.Get())
+                    string drive = driveLetter.TrimEnd('\\', '/');
+                    if (!drive.EndsWith(":")) drive += ":";
+                    string rootPath = drive + "\\";
+
+                    if (GetVolumeInformationW(rootPath, null, 0, out uint serialNumber, out _, out _, null, 0))
                     {
-                        string serial = obj["VolumeSerialNumber"]?.ToString();
-                        if (!string.IsNullOrEmpty(serial)) return serial;
+                        if (serialNumber != 0)
+                        {
+                            return serialNumber.ToString("X8");
+                        }
                     }
                 }
+                catch { }
+
+                // 若 Win32 API 无法获取，降级尝试 WMI 查询
+                try
+                {
+                    string drive = driveLetter.TrimEnd('\\', '/');
+                    if (!drive.EndsWith(":")) drive += ":";
+                    using (var searcher = new ManagementObjectSearcher(
+                        $"SELECT VolumeSerialNumber FROM Win32_LogicalDisk WHERE DeviceID='{drive}'"))
+                    {
+                        foreach (ManagementObject obj in searcher.Get())
+                        {
+                            string serial = obj["VolumeSerialNumber"]?.ToString();
+                            if (!string.IsNullOrEmpty(serial)) return serial;
+                        }
+                    }
+                }
+                catch { }
             }
-            catch { }
 #endif
             return "";
         }
@@ -344,8 +379,18 @@ namespace USBAutoCopy
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
                     string clean = driveLetter.TrimEnd('\\', '/');
-                    DriveInfo di = new DriveInfo(clean.EndsWith(":") ? clean : clean + ":");
-                    string label = string.IsNullOrEmpty(di.VolumeLabel) ? "未命名U盘" : di.VolumeLabel;
+                    string root = clean.EndsWith(":") ? clean + "\\" : clean + ":\\";
+                    string label = "未命名U盘";
+                    try
+                    {
+                        DriveInfo di = new DriveInfo(root);
+                        if (di.IsReady && !string.IsNullOrEmpty(di.VolumeLabel))
+                        {
+                            label = di.VolumeLabel;
+                        }
+                    }
+                    catch { }
+
                     string serial = GetVolumeSerial(driveLetter);
                     return string.IsNullOrEmpty(serial) ? label : $"{label}|{serial}";
                 }

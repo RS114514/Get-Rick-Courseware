@@ -2,8 +2,8 @@
 chcp 65001 > null
 echo 🚀 开始编译 Windows 桌面版本 (win-x64)...
 
-:: 执行 dotnet 发布指令，生成自包含的单文件 exe
-dotnet publish RickCourseware.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish-win
+:: 执行 dotnet 发布指令，生成自包含、内嵌原生依赖的单文件 exe
+dotnet publish RickCourseware.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish-win
 
 if %ERRORLEVEL% NEQ 0 (
     echo ❌ 编译失败，终止操作。

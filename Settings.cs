@@ -12,9 +12,45 @@ namespace USBAutoCopy
             public static Settings Default => _default;
 
             private static Dictionary<string, string> settings = new Dictionary<string, string>();
-            private static string configFile = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "RickConfig.ini");
+            private static string GetConfigFile()
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string localFile = Path.Combine(baseDir, "RickConfig.ini");
+                try
+                {
+                    if (File.Exists(localFile))
+                    {
+                        return localFile;
+                    }
+
+                    // 探测目录写入权限
+                    string testFile = Path.Combine(baseDir, ".test_" + Guid.NewGuid().ToString("N"));
+                    File.WriteAllText(testFile, "1");
+                    File.Delete(testFile);
+                    return localFile;
+                }
+                catch
+                {
+                    // 若程序所在目录受限无写权限，自动降级至用户本地数据目录
+                    try
+                    {
+                        string userDir = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "GetRickCourseware");
+                        if (!Directory.Exists(userDir))
+                        {
+                            Directory.CreateDirectory(userDir);
+                        }
+                        return Path.Combine(userDir, "RickConfig.ini");
+                    }
+                    catch
+                    {
+                        return localFile;
+                    }
+                }
+            }
+
+            private static string configFile => GetConfigFile();
 
             static Settings()
             {
@@ -61,11 +97,24 @@ namespace USBAutoCopy
             
             private static void Load()
             {
-                if (File.Exists(configFile))
+                string path = configFile;
+                // 若优先路径不存在，尝试探测另一侧路径
+                if (!File.Exists(path))
+                {
+                    string fallbackUser = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "GetRickCourseware", "RickConfig.ini");
+                    if (File.Exists(fallbackUser))
+                    {
+                        path = fallbackUser;
+                    }
+                }
+
+                if (File.Exists(path))
                 {
                     try
                     {
-                        foreach (var line in File.ReadAllLines(configFile))
+                        foreach (var line in File.ReadAllLines(path))
                         {
                             var parts = line.Split(new[] { '=' }, 2);
                             if (parts.Length == 2)
@@ -80,12 +129,34 @@ namespace USBAutoCopy
             {
                 try
                 {
+                    string target = configFile;
+                    string dir = Path.GetDirectoryName(target);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
                     var lines = new List<string>();
                     foreach (var kvp in settings)
                         lines.Add($"{kvp.Key}={kvp.Value}");
-                    File.WriteAllLines(configFile, lines);
+                    File.WriteAllLines(target, lines);
                 }
-                catch { /* 静默失败，配置保存错误 */ }
+                catch
+                {
+                    // 若首选路径保存失败，尝试写至本地用户数据目录
+                    try
+                    {
+                        string userDir = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "GetRickCourseware");
+                        if (!Directory.Exists(userDir)) Directory.CreateDirectory(userDir);
+                        string fallbackTarget = Path.Combine(userDir, "RickConfig.ini");
+                        var lines = new List<string>();
+                        foreach (var kvp in settings) lines.Add($"{kvp.Key}={kvp.Value}");
+                        File.WriteAllLines(fallbackTarget, lines);
+                    }
+                    catch { }
+                }
             }
         }
     }

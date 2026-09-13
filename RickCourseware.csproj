@@ -16,9 +16,16 @@
      <Company>RS基金会</Company>
      <Copyright>Copyright © 2025 RS114514</Copyright>
      <ApplicationIcon>app.ico</ApplicationIcon>
+     <ApplicationManifest>app.manifest</ApplicationManifest>
+     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
      <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
    </PropertyGroup>
  
+   <ItemGroup>
+     <EmbeddedResource Include="app.ico" />
+   </ItemGroup>
+
    <ItemGroup>
      <PackageReference Include="System.Management" Version="9.0.0" />
    </ItemGroup>

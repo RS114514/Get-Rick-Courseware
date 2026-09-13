@@ -21,26 +21,34 @@ namespace USBAutoCopy
         public USBAutoCopy()
         {
             // 初始化托盘图标
-            trayIcon = new NotifyIcon()
+            try
             {
-                Icon = LoadAppIcon(),
-                Visible = true
-            };
+                trayIcon = new NotifyIcon()
+                {
+                    Icon = LoadAppIcon(),
+                    Text = "获取Rick课件",
+                    Visible = true
+                };
 
-            // 创建托盘菜单
-            trayMenu = new ContextMenuStrip();
-            trayMenu.Items.Add("显示主窗口", null, ShowMainForm);
-            trayMenu.Items.Add("-");
-            trayMenu.Items.Add("启动监控", null, StartMonitoring);
-            trayMenu.Items.Add("停止监控", null, StopMonitoring);
-            trayMenu.Items.Add("-");
-            trayMenu.Items.Add("开机自启", null, ToggleAutoStart);
-            trayMenu.Items.Add("-");
-            trayMenu.Items.Add("退出", null, Exit);
-            trayIcon.ContextMenuStrip = trayMenu;
+                // 创建托盘菜单
+                trayMenu = new ContextMenuStrip();
+                trayMenu.Items.Add("显示主窗口", null, ShowMainForm);
+                trayMenu.Items.Add("-");
+                trayMenu.Items.Add("启动监控", null, StartMonitoring);
+                trayMenu.Items.Add("停止监控", null, StopMonitoring);
+                trayMenu.Items.Add("-");
+                trayMenu.Items.Add("开机自启", null, ToggleAutoStart);
+                trayMenu.Items.Add("-");
+                trayMenu.Items.Add("退出", null, Exit);
+                trayIcon.ContextMenuStrip = trayMenu;
 
-            // 双击托盘图标显示主窗口
-            trayIcon.DoubleClick += (s, e) => ShowMainForm(null, null);
+                // 双击托盘图标显示主窗口
+                trayIcon.DoubleClick += (s, e) => ShowMainForm(null, null);
+            }
+            catch (Exception ex)
+            {
+                Program.LogException("初始化托盘图标失败", ex);
+            }
 
             // 创建主窗口
             mainForm = new MainForm(this);
@@ -50,24 +58,79 @@ namespace USBAutoCopy
             startTimer.Interval = 3000;
             startTimer.Tick += (s, e) =>
             {
-                startTimer.Stop();
-                trayIcon.ShowBalloonTip(3000, "获取Rick课件", "程序已启动，正在监控U盘...", ToolTipIcon.Info);
-                StartMonitoring(null, null);
+                try
+                {
+                    startTimer.Stop();
+                    startTimer.Dispose();
+                    if (trayIcon != null)
+                    {
+                        try
+                        {
+                            trayIcon.ShowBalloonTip(3000, "获取Rick课件", "程序已启动，正在监控U盘...", ToolTipIcon.Info);
+                        }
+                        catch { }
+                    }
+                    StartMonitoring(null, null);
+                }
+                catch (Exception ex)
+                {
+                    Program.LogException("定时启动监控失败", ex);
+                }
             };
             startTimer.Start();
         }
 
         public static Icon LoadAppIcon()
         {
+            // 1. 尝试从应用目录加载 app.ico
             try
             {
-                string exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-                return Icon.ExtractAssociatedIcon(exePath);
+                string localIco = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                if (File.Exists(localIco))
+                {
+                    return new Icon(localIco);
+                }
             }
-            catch
+            catch { }
+
+            // 2. 尝试从嵌入资源加载 app.ico
+            try
             {
-                return SystemIcons.Shield;
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                using (var stream = assembly.GetManifestResourceStream("USBAutoCopy.app.ico"))
+                {
+                    if (stream != null)
+                    {
+                        return new Icon(stream);
+                    }
+                }
             }
+            catch { }
+
+            // 3. 尝试从可执行文件提取关联图标
+            try
+            {
+                string exePath = null;
+                var prop = typeof(Environment).GetProperty("ProcessPath", 
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (prop != null)
+                {
+                    exePath = prop.GetValue(null) as string;
+                }
+                if (string.IsNullOrEmpty(exePath))
+                {
+                    exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+                }
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                {
+                    Icon extracted = Icon.ExtractAssociatedIcon(exePath);
+                    if (extracted != null) return extracted;
+                }
+            }
+            catch { }
+
+            // 4. 多层兜底
+            return SystemIcons.Application ?? SystemIcons.Shield;
         }
 
         private void ShowMainForm(object sender, EventArgs e)
@@ -545,13 +608,36 @@ namespace USBAutoCopy
 
             try
             {
-                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-                string logsDir = Path.Combine(exeDir, "logs");
-                Directory.CreateDirectory(logsDir);
+                string logsDir = GetLogsDirectory();
                 string logFile = Path.Combine(logsDir, $"{DateTime.Now:yyyyMMdd}.log");
                 File.AppendAllText(logFile, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
             }
             catch { }
+        }
+
+        private static string GetLogsDirectory()
+        {
+            try
+            {
+                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
+                string logsDir = Path.Combine(exeDir, "logs");
+                if (!Directory.Exists(logsDir))
+                {
+                    Directory.CreateDirectory(logsDir);
+                }
+                return logsDir;
+            }
+            catch
+            {
+                string userDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "GetRickCourseware", "logs");
+                if (!Directory.Exists(userDir))
+                {
+                    Directory.CreateDirectory(userDir);
+                }
+                return userDir;
+            }
         }
 
         public void SetMonitoringStatus(bool isMonitoring)
@@ -704,22 +790,103 @@ namespace USBAutoCopy
 
 
 
-    class Program
+    public static class Program
     {
         [STAThread]
         static void Main()
         {
-            using (var mutex = new System.Threading.Mutex(true, "获取Rick课件_SingleInstance", out bool createdNew))
+            // 全局未捕获异常拦截与处理
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (sender, e) =>
             {
-                if (!createdNew)
+                LogException("UI线程未捕获异常", e.Exception);
+                MessageBox.Show($"程序发生错误：\n{e.Exception.Message}\n\n详细信息已记录至 crash.log", 
+                    "获取Rick课件 - 运行异常", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+            {
+                var ex = e.ExceptionObject as Exception;
+                LogException("非UI线程未捕获异常", ex);
+                MessageBox.Show($"程序遇到未知严重错误：\n{ex?.Message}\n\n详细信息已记录至 crash.log", 
+                    "获取Rick课件 - 崩溃拦截", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            };
+
+            try
+            {
+                using (var mutex = new System.Threading.Mutex(true, "获取Rick课件_SingleInstance", out bool createdNew))
                 {
-                    MessageBox.Show("程序已在运行中！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
+                    if (!createdNew)
+                    {
+                        MessageBox.Show("程序已在后台运行中！\n请查看屏幕右下角任务栏托盘图标（可能在折叠小箭头 ^ 内部）。", 
+                            "获取Rick课件", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+
+                    try
+                    {
+                        var method = typeof(Application).GetMethod("SetHighDpiMode",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                        if (method != null)
+                        {
+                            var highDpiModeType = Type.GetType("System.Windows.Forms.HighDpiMode, System.Windows.Forms");
+                            if (highDpiModeType != null)
+                            {
+                                var systemAware = Enum.Parse(highDpiModeType, "SystemAware");
+                                method.Invoke(null, new object[] { systemAware });
+                            }
+                        }
+                    }
+                    catch { }
+
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                    Application.Run(new USBAutoCopy());
                 }
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new USBAutoCopy());
             }
+            catch (Exception ex)
+            {
+                LogException("Main函数致命启动异常", ex);
+                MessageBox.Show($"程序启动失败：\n{ex.Message}\n\n详细错误已记录至 crash.log", 
+                    "获取Rick课件 - 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        public static void LogException(string tag, Exception ex)
+        {
+            if (ex == null) return;
+            string logText = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{tag}] {ex.GetType().FullName}: {ex.Message}\r\n{ex.StackTrace}\r\n\r\n";
+
+            // 1. 优先尝试写入程序当前目录
+            try
+            {
+                string localLog = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log");
+                File.AppendAllText(localLog, logText);
+            }
+            catch { }
+
+            // 2. 尝试写入用户本地 AppData 目录
+            try
+            {
+                string userDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "GetRickCourseware");
+                if (!Directory.Exists(userDir))
+                {
+                    Directory.CreateDirectory(userDir);
+                }
+                string userLog = Path.Combine(userDir, "crash.log");
+                File.AppendAllText(userLog, logText);
+            }
+            catch { }
+
+            // 3. 尝试写入系统临时目录
+            try
+            {
+                string tempLog = Path.Combine(Path.GetTempPath(), "RickCourseware_crash.log");
+                File.AppendAllText(tempLog, logText);
+            }
+            catch { }
         }
     }
 }
