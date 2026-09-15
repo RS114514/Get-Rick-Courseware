@@ -8,3 +8,5 @@ mac/publish-mac/
 *.app/
 *.exe
 *.zip
+*.o
+*.syso
