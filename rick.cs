@@ -514,7 +514,7 @@ namespace USBAutoCopy
                 {
                     if (d.DriveType == DriveType.Removable && d.IsReady)
                     {
-                        string drivePath = d.Name.TrimEnd('\\');
+                        string drivePath = d.Name.TrimEnd(new char[] { '\\' });
                         string label = string.IsNullOrEmpty(d.VolumeLabel) ? "未命名U盘" : d.VolumeLabel;
                         string uniqueId = USBMonitor.GetDriveUniqueId(drivePath);
                         bool isBlocked = blocked.Contains(uniqueId);

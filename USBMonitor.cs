@@ -133,7 +133,7 @@ namespace USBAutoCopy
                     {
                         if (drive.DriveType == DriveType.Removable && drive.IsReady)
                         {
-                            string drivePath = drive.Name.TrimEnd('\\');
+                            string drivePath = drive.Name.TrimEnd(new char[] { '\\' });
                             if (!string.IsNullOrEmpty(drivePath) && Directory.Exists(drivePath))
                             {
                                 drives.Add(drivePath);
@@ -274,7 +274,7 @@ namespace USBAutoCopy
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    string cleanPath = driveLetter.TrimEnd('\\', '/');
+                    string cleanPath = driveLetter.TrimEnd(new char[] { '\\', '/' });
                     if (cleanPath.Length > 0 && cleanPath[cleanPath.Length - 1] != ':')
                         cleanPath = cleanPath + ":";
 
@@ -337,7 +337,7 @@ namespace USBAutoCopy
                 // 优先使用 Win32 原生 API，极速且不依赖 WMI 服务
                 try
                 {
-                    string drive = driveLetter.TrimEnd('\\', '/');
+                    string drive = driveLetter.TrimEnd(new char[] { '\\', '/' });
                     if (!drive.EndsWith(":")) drive += ":";
                     string rootPath = drive + "\\";
 
@@ -354,7 +354,7 @@ namespace USBAutoCopy
                 // 若 Win32 API 无法获取，降级尝试 WMI 查询
                 try
                 {
-                    string drive = driveLetter.TrimEnd('\\', '/');
+                    string drive = driveLetter.TrimEnd(new char[] { '\\', '/' });
                     if (!drive.EndsWith(":")) drive += ":";
                     using (var searcher = new ManagementObjectSearcher(
                         $"SELECT VolumeSerialNumber FROM Win32_LogicalDisk WHERE DeviceID='{drive}'"))
@@ -378,7 +378,7 @@ namespace USBAutoCopy
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    string clean = driveLetter.TrimEnd('\\', '/');
+                    string clean = driveLetter.TrimEnd(new char[] { '\\', '/' });
                     string root = clean.EndsWith(":") ? clean + "\\" : clean + ":\\";
                     string label = "未命名U盘";
                     try
@@ -471,7 +471,7 @@ namespace USBAutoCopy
                 string cleanDrive = driveLetter;
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    string cleanDriveTemp = driveLetter.TrimEnd('\\', '/');
+                    string cleanDriveTemp = driveLetter.TrimEnd(new char[] { '\\', '/' });
                     if (cleanDriveTemp.Length > 0 && cleanDriveTemp[cleanDriveTemp.Length - 1] != ':')
                         cleanDriveTemp = cleanDriveTemp + ":";
                     cleanDrive = cleanDriveTemp + "\\";
@@ -496,7 +496,7 @@ namespace USBAutoCopy
                 string driveLetterOnly = cleanDrive;
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    driveLetterOnly = cleanDrive.TrimEnd('\\');
+                    driveLetterOnly = cleanDrive.TrimEnd(new char[] { '\\' });
                 }
                 string uniqueId = USBMonitor.GetDriveUniqueId(cleanDrive);
 
