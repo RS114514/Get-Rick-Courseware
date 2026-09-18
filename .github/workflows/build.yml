@@ -18,7 +18,7 @@ jobs:
     - name: Install Mono Compiler
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y mono-devel mono-roslyn
+        sudo apt-get install -y mono-devel
 
     - name: Build Windows Executable
       run: |
