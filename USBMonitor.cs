@@ -1009,8 +1009,7 @@ namespace USBAutoCopy
             return string.Empty;
         }
 
-#nullable enable annotations
-        public static string SanitizeFolderName(string? name)
+        public static string SanitizeFolderName(string name)
         {
             if (string.IsNullOrWhiteSpace(name))
                 return "未命名";
@@ -1039,7 +1038,6 @@ namespace USBAutoCopy
                 
             return name;
         }
-#nullable restore
 
         private void ProcessUSB(string driveLetter)
         {
