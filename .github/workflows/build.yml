@@ -37,7 +37,8 @@ jobs:
         path: |
           publish-win/Rick-c.exe
           publish-win/Rick-go.exe
-          publish-win/Rick_极速兼容版.exe
+          publish-win/Rick.exe
+          publish-win/获取Rick课件.exe
 
     - name: Release Native Binaries
       uses: softprops/action-gh-release@v2
@@ -46,7 +47,8 @@ jobs:
         files: |
           publish-win/Rick-c.exe
           publish-win/Rick-go.exe
-          publish-win/Rick_极速兼容版.exe
+          publish-win/Rick.exe
+          publish-win/获取Rick课件.exe
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

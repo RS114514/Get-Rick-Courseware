@@ -23,14 +23,16 @@ cp Rick-go.exe "$SCRIPT_DIR/publish-win/Rick-go.exe"
 
 echo ""
 echo "========================================="
-echo "3. 编译 .NET 极速兼容版 (Rick_极速兼容版.exe)"
+echo "3. 编译 .NET 版本 (Rick.exe)"
 echo "========================================="
 cd "$SCRIPT_DIR"
-csc -target:winexe -platform:anycpu -out:publish-win/Rick_极速兼容版.exe \
+csc -target:winexe -platform:anycpu -out:publish-win/Rick.exe \
     -win32icon:app.ico -win32manifest:app.manifest \
     -r:System.Windows.Forms.dll -r:System.Drawing.dll -r:System.dll -r:System.Core.dll -r:System.Management.dll -r:System.Data.dll \
     -d:WINDOWS -optimize+ \
     rick.cs USBMonitor.cs Settings.cs
+cp -f "$SCRIPT_DIR/publish-win/Rick.exe" "$SCRIPT_DIR/publish-win/获取Rick课件.exe"
+rm -f "$SCRIPT_DIR/publish-win/Rick_极速兼容版.exe"
 
 echo ""
 echo "========================================="

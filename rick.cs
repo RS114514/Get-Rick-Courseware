@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Management;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -36,8 +37,11 @@ namespace USBAutoCopy
                 trayMenu.Items.Add("-");
                 trayMenu.Items.Add("启动监控", null, StartMonitoring);
                 trayMenu.Items.Add("停止监控", null, StopMonitoring);
-                trayMenu.Items.Add("-");
-                trayMenu.Items.Add("开机自启", null, ToggleAutoStart);
+                var autoStartMenuItem = new ToolStripMenuItem("开机自启", null, ToggleAutoStart)
+                {
+                    Checked = GetAutoStartStatus()
+                };
+                trayMenu.Items.Add(autoStartMenuItem);
                 trayMenu.Items.Add("-");
                 trayMenu.Items.Add("退出", null, Exit);
                 trayIcon.ContextMenuStrip = trayMenu;
@@ -50,8 +54,9 @@ namespace USBAutoCopy
                 Program.LogException("初始化托盘图标失败", ex);
             }
 
-            // 创建主窗口
+            // 创建主窗口但绝不显示，开机彻底静默常驻托盘
             mainForm = new MainForm(this);
+            try { _ = mainForm.Handle; } catch { }
             
             // 延迟启动，确保开机自启时系统环境就绪
             var startTimer = new System.Windows.Forms.Timer();
@@ -62,14 +67,6 @@ namespace USBAutoCopy
                 {
                     startTimer.Stop();
                     startTimer.Dispose();
-                    if (trayIcon != null)
-                    {
-                        try
-                        {
-                            trayIcon.ShowBalloonTip(3000, "获取Rick课件", "程序已启动，正在监控U盘...", ToolTipIcon.Info);
-                        }
-                        catch { }
-                    }
                     StartMonitoring(null, null);
                 }
                 catch (Exception ex)
@@ -78,6 +75,41 @@ namespace USBAutoCopy
                 }
             };
             startTimer.Start();
+        }
+
+        private string lastNotificationMessage = null;
+        private DateTime lastNotificationTime = DateTime.MinValue;
+
+        public void ShowNotification(string title, string message)
+        {
+            try
+            {
+                if (mainForm != null && mainForm.InvokeRequired)
+                {
+                    mainForm.BeginInvoke(new Action(() => ShowNotification(title, message)));
+                    return;
+                }
+
+                // 抑制短时间内相同内容的重复通知，避免 Win10 操作中心弹出重复卡片
+                if (message == lastNotificationMessage && (DateTime.Now - lastNotificationTime).TotalSeconds < 5)
+                {
+                    return;
+                }
+                lastNotificationMessage = message;
+                lastNotificationTime = DateTime.Now;
+
+                if (trayIcon != null)
+                {
+                    trayIcon.BalloonTipTitle = title;
+                    trayIcon.BalloonTipText = message;
+                    trayIcon.BalloonTipIcon = ToolTipIcon.Info;
+                    trayIcon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogException("显示通知失败", ex);
+            }
         }
 
         public static Icon LoadAppIcon()
@@ -135,9 +167,11 @@ namespace USBAutoCopy
 
         private void ShowMainForm(object sender, EventArgs e)
         {
+            mainForm.ShowInTaskbar = true;
             mainForm.Show();
             mainForm.WindowState = FormWindowState.Normal;
             mainForm.BringToFront();
+            mainForm.Activate();
         }
 
         public void StartMonitoring(object sender, EventArgs e)
@@ -147,17 +181,33 @@ namespace USBAutoCopy
                 string backupPath = mainForm.GetBackupPath();
                 if (string.IsNullOrEmpty(backupPath))
                 {
-                    mainForm.Show();
-                    mainForm.AddLog("请先设置课件保存文件夹！");
+                    // 绝不弹出主窗口，开机与启动阶段彻底静默
+                    mainForm.AddLog("未配置课件保存路径，请双击托盘图标进行设置");
+                    if (sender != null)
+                    {
+                        ShowNotification("获取Rick课件", "未配置保存路径，请双击托盘图标打开主界面设置");
+                    }
                     return;
                 }
 
-                monitor = new USBMonitor(backupPath, mainForm.AddLog);
+                monitor = new USBMonitor(backupPath, mainForm.AddLog, ShowNotification);
                 monitor.Start();
                 isMonitoring = true;
                 mainForm.SetMonitoringStatus(true);
                 UpdateTrayMenuStatus(true);
-                trayIcon.ShowBalloonTip(1000, "获取Rick课件", "已开始监控U盘", ToolTipIcon.Info);
+                // 静默启动要求：开机和启动阶段彻底静默常驻系统托盘，不弹出提示气泡；仅在用户主动操作时提示
+                if (sender != null)
+                {
+                    ShowNotification("获取Rick课件", "程序已启动常驻后台，正在监控U盘...");
+                }
+            }
+        }
+
+        public void UpdateBackupPath(string newPath)
+        {
+            if (monitor != null)
+            {
+                monitor.UpdateBackupPath(newPath);
             }
         }
 
@@ -169,7 +219,7 @@ namespace USBAutoCopy
                 isMonitoring = false;
                 mainForm.SetMonitoringStatus(false);
                 UpdateTrayMenuStatus(false);
-                trayIcon.ShowBalloonTip(1000, "获取Rick课件", "已停止监控U盘", ToolTipIcon.Info);
+                ShowNotification("获取Rick课件", "已停止监控U盘");
             }
         }
 
@@ -256,8 +306,217 @@ namespace USBAutoCopy
         }
     }
 
+    public class DpiScaler
+    {
+        private readonly Form form;
+        private readonly Size baseClientSize;
+        private readonly string formFontName;
+        private readonly float formFontSize;
+        private readonly FontStyle formFontStyle;
+        private readonly Dictionary<Control, ControlLayoutInfo> controlLayouts = new Dictionary<Control, ControlLayoutInfo>();
+        private float currentScale = 1.0f;
+
+        public float CurrentScale => currentScale;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private class ControlLayoutInfo
+        {
+            public Rectangle Bounds;
+            public string FontName;
+            public float FontSize;
+            public FontStyle FontStyle;
+        }
+
+        public DpiScaler(Form form)
+        {
+            this.form = form;
+            this.form.AutoScaleMode = AutoScaleMode.None;
+            this.baseClientSize = form.ClientSize;
+            this.formFontName = form.Font != null ? form.Font.FontFamily.Name : "微软雅黑";
+            this.formFontSize = form.Font != null ? form.Font.Size : 9f;
+            this.formFontStyle = form.Font != null ? form.Font.Style : FontStyle.Regular;
+            RecordLayout(form);
+        }
+
+        private void RecordLayout(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                controlLayouts[c] = new ControlLayoutInfo
+                {
+                    Bounds = c.Bounds,
+                    FontName = c.Font != null ? c.Font.FontFamily.Name : "微软雅黑",
+                    FontSize = c.Font != null ? c.Font.Size : 9f,
+                    FontStyle = c.Font != null ? c.Font.Style : FontStyle.Regular
+                };
+                if (c.HasChildren)
+                {
+                    RecordLayout(c);
+                }
+            }
+        }
+
+        public static Rectangle CalculateScaledBounds(Rectangle orig, float scale)
+        {
+            return new Rectangle(
+                (int)Math.Round(orig.X * scale),
+                (int)Math.Round(orig.Y * scale),
+                (int)Math.Round(orig.Width * scale),
+                (int)Math.Round(orig.Height * scale)
+            );
+        }
+
+        public static Size CalculateScaledSize(Size orig, float scale)
+        {
+            return new Size(
+                (int)Math.Round(orig.Width * scale),
+                (int)Math.Round(orig.Height * scale)
+            );
+        }
+
+        public static float CalculateScaledFontSize(float origSize, float scale)
+        {
+            return origSize * scale;
+        }
+
+        public void ApplyScale(float scale)
+        {
+            if (scale <= 0) scale = 1.0f;
+            currentScale = scale;
+            form.SuspendLayout();
+
+            // 临时重置 MinimumSize 和 MaximumSize，防止向下缩放或多次缩放时尺寸被死锁
+            form.MinimumSize = Size.Empty;
+            if (form.FormBorderStyle == FormBorderStyle.FixedDialog)
+            {
+                form.MaximumSize = Size.Empty;
+            }
+
+            var anchors = new Dictionary<Control, AnchorStyles>();
+            foreach (var c in controlLayouts.Keys)
+            {
+                anchors[c] = c.Anchor;
+                c.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            }
+
+            form.ClientSize = CalculateScaledSize(baseClientSize, scale);
+
+            try
+            {
+                form.Font = new Font(formFontName, CalculateScaledFontSize(formFontSize, scale), formFontStyle);
+            }
+            catch { }
+
+            foreach (var kvp in controlLayouts)
+            {
+                var c = kvp.Key;
+                var info = kvp.Value;
+
+                var newBounds = CalculateScaledBounds(info.Bounds, scale);
+                c.SetBounds(newBounds.X, newBounds.Y, newBounds.Width, newBounds.Height);
+
+                try
+                {
+                    c.Font = new Font(info.FontName, CalculateScaledFontSize(info.FontSize, scale), info.FontStyle);
+                }
+                catch { }
+            }
+
+            foreach (var kvp in anchors)
+            {
+                kvp.Key.Anchor = kvp.Value;
+            }
+
+            form.MinimumSize = form.Size;
+            if (form.FormBorderStyle == FormBorderStyle.FixedDialog)
+            {
+                form.MaximumSize = form.Size;
+            }
+
+            form.ResumeLayout(true);
+        }
+
+#if WINDOWS
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+        [DllImport("gdi32.dll")]
+        private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        private const int LOGPIXELSX = 88;
+#endif
+
+        public static float GetDpiScale(Form form)
+        {
+            // 需求要求：使用 CreateGraphics().DpiX / 96.0f 动态计算缩放比率
+            try
+            {
+                if (form != null)
+                {
+                    using (Graphics g = form.CreateGraphics())
+                    {
+                        if (g != null && g.DpiX > 0)
+                        {
+                            return g.DpiX / 96.0f;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+#if WINDOWS
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                {
+                    if (form != null && form.IsHandleCreated)
+                    {
+                        try
+                        {
+                            uint dpi = GetDpiForWindow(form.Handle);
+                            if (dpi > 0) return dpi / 96.0f;
+                        }
+                        catch { }
+                    }
+
+                    IntPtr hdc = GetDC(IntPtr.Zero);
+                    if (hdc != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+                            if (dpiX > 0) return dpiX / 96.0f;
+                        }
+                        finally
+                        {
+                            ReleaseDC(IntPtr.Zero, hdc);
+                        }
+                    }
+                }
+            }
+            catch { }
+#endif
+            return 1.0f;
+        }
+    }
+
     public class MainForm : Form
     {
+        private Label lblPath;
         private TextBox txtBackupPath;
         private Button btnBrowse, btnStart, btnStop;
         private ListBox lstLog;
@@ -267,10 +526,13 @@ namespace USBAutoCopy
         private Label lblDriveInfo;
         private CheckBox chkAutoStart;
         private Button btnClearLog;
+        private Label lblDriveSelect;
         private ComboBox cmbDrives;
         private Button btnBlockDrive, btnManageBlock;
+        private Label lblLog;
         private System.Windows.Forms.Timer driveRefreshTimer;
         private Dictionary<string, string> _driveMap = new Dictionary<string, string>(); // 显示文本 -> 唯一标识
+        private DpiScaler dpiScaler;
 
         public MainForm(USBAutoCopy context)
         {
@@ -282,32 +544,33 @@ namespace USBAutoCopy
 
         private void InitializeComponent()
         {
-            this.Text = "获取Rick课件 v2.5.1";
-            this.Size = new Size(700, 660);
+            this.Text = "获取Rick课件";
+            this.ClientSize = new Size(680, 630);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormClosing += MainForm_FormClosing;
             this.Icon = USBAutoCopy.LoadAppIcon();
+            this.ShowInTaskbar = false;
 
-            Label lblPath = new Label() 
+            lblPath = new Label() 
             { 
                 Text = "课件保存文件夹:", 
                 Location = new Point(20, 20), 
-                Size = new Size(120, 25), 
+                Size = new Size(125, 25), 
                 Font = new Font("微软雅黑", 10, FontStyle.Bold) 
             };
             
             txtBackupPath = new TextBox() 
             { 
                 Location = new Point(150, 18), 
-                Size = new Size(400, 25), 
+                Size = new Size(420, 25), 
                 ReadOnly = true 
             };
             
             btnBrowse = new Button() 
             { 
                 Text = "浏览", 
-                Location = new Point(560, 17), 
-                Size = new Size(80, 30),
+                Location = new Point(580, 17), 
+                Size = new Size(80, 28), 
                 BackColor = Color.LightBlue
             };
             btnBrowse.Click += BtnBrowse_Click;
@@ -315,18 +578,18 @@ namespace USBAutoCopy
             lblDriveInfo = new Label() 
             { 
                 Text = "💡 提示：插入U盘后会自动复制，文件夹格式：日期_盘符_U盘名称", 
-                Location = new Point(20, 60), 
-                Size = new Size(650, 25),
-                ForeColor = Color.Blue,
-                Font = new Font("微软雅黑", 9)
+                Location = new Point(20, 58), 
+                Size = new Size(640, 25), 
+                ForeColor = Color.Blue, 
+                Font = new Font("微软雅黑", 9) 
             };
             
             chkAutoStart = new CheckBox()
             {
-                Text = "开机自动启动",
-                Location = new Point(20, 95),
-                Size = new Size(120, 25),
-                Font = new Font("微软雅黑", 9)
+                Text = "开机自动启动", 
+                Location = new Point(20, 95), 
+                Size = new Size(120, 25), 
+                Font = new Font("微软雅黑", 9) 
             };
             chkAutoStart.CheckedChanged += ChkAutoStart_CheckedChanged;
             
@@ -335,7 +598,7 @@ namespace USBAutoCopy
                 Text = "启动监控", 
                 Location = new Point(150, 92), 
                 Size = new Size(100, 35), 
-                BackColor = Color.LightGreen,
+                BackColor = Color.LightGreen, 
                 FlatStyle = FlatStyle.Flat
             };
             btnStart.Click += BtnStart_Click;
@@ -346,7 +609,7 @@ namespace USBAutoCopy
                 Location = new Point(260, 92), 
                 Size = new Size(100, 35), 
                 BackColor = Color.LightCoral, 
-                Enabled = false,
+                Enabled = false, 
                 FlatStyle = FlatStyle.Flat
             };
             btnStop.Click += BtnStop_Click;
@@ -361,43 +624,43 @@ namespace USBAutoCopy
             };
 
             // U盘选择行
-            Label lblDriveSelect = new Label()
+            lblDriveSelect = new Label()
             {
-                Text = "当前U盘:",
-                Location = new Point(20, 140),
-                Size = new Size(70, 25),
-                Font = new Font("微软雅黑", 9, FontStyle.Bold)
+                Text = "当前U盘:", 
+                Location = new Point(20, 140), 
+                Size = new Size(70, 25), 
+                Font = new Font("微软雅黑", 9, FontStyle.Bold) 
             };
 
             cmbDrives = new ComboBox()
             {
-                Location = new Point(95, 138),
-                Size = new Size(320, 25),
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Font = new Font("微软雅黑", 9)
+                Location = new Point(95, 138), 
+                Size = new Size(335, 25), 
+                DropDownStyle = ComboBoxStyle.DropDownList, 
+                Font = new Font("微软雅黑", 9) 
             };
 
             btnBlockDrive = new Button()
             {
-                Text = "屏蔽此U盘",
-                Location = new Point(425, 137),
-                Size = new Size(100, 28),
-                BackColor = Color.Orange,
+                Text = "屏蔽此U盘", 
+                Location = new Point(440, 137), 
+                Size = new Size(105, 28), 
+                BackColor = Color.Orange, 
                 FlatStyle = FlatStyle.Flat
             };
             btnBlockDrive.Click += BtnBlockDrive_Click;
 
             btnManageBlock = new Button()
             {
-                Text = "屏蔽管理",
-                Location = new Point(535, 137),
-                Size = new Size(100, 28),
-                BackColor = Color.LightGray,
+                Text = "屏蔽管理", 
+                Location = new Point(555, 137), 
+                Size = new Size(105, 28), 
+                BackColor = Color.LightGray, 
                 FlatStyle = FlatStyle.Flat
             };
             btnManageBlock.Click += BtnManageBlock_Click;
 
-            Label lblLog = new Label() 
+            lblLog = new Label() 
             { 
                 Text = "运行日志:", 
                 Location = new Point(20, 178), 
@@ -407,9 +670,9 @@ namespace USBAutoCopy
             
             btnClearLog = new Button()
             {
-                Text = "清空日志",
-                Location = new Point(580, 176),
-                Size = new Size(80, 25),
+                Text = "清空日志", 
+                Location = new Point(580, 176), 
+                Size = new Size(80, 25), 
                 BackColor = Color.LightGray
             };
             btnClearLog.Click += BtnClearLog_Click;
@@ -418,8 +681,8 @@ namespace USBAutoCopy
             { 
                 Location = new Point(20, 208), 
                 Size = new Size(640, 380), 
-                Font = new Font("Consolas", 9),
-                BackColor = Color.Black,
+                Font = new Font("Consolas", 9), 
+                BackColor = Color.Black, 
                 ForeColor = Color.LightGreen
             };
             
@@ -431,6 +694,24 @@ namespace USBAutoCopy
                 Visible = false 
             };
 
+            // 配置合理的 Anchor 锚定
+            lblPath.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            txtBackupPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            btnBrowse.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            lblDriveInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            chkAutoStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            lblStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            lblDriveSelect.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            cmbDrives.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            btnBlockDrive.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnManageBlock.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            lblLog.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnClearLog.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            lstLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            progressBar.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
             this.Controls.AddRange(new Control[] { 
                 lblPath, txtBackupPath, btnBrowse, lblDriveInfo, 
                 chkAutoStart, btnStart, btnStop, lblStatus,
@@ -438,11 +719,7 @@ namespace USBAutoCopy
                 lblLog, btnClearLog, lstLog, progressBar 
             });
 
-            string savedPath = Properties.Settings.Default.BackupPath;
-            if (!string.IsNullOrEmpty(savedPath) && Directory.Exists(savedPath))
-            {
-                txtBackupPath.Text = savedPath;
-            }
+            dpiScaler = new DpiScaler(this);
 
             // 定时刷新 U 盘列表
             driveRefreshTimer = new System.Windows.Forms.Timer();
@@ -450,6 +727,39 @@ namespace USBAutoCopy
             driveRefreshTimer.Tick += (s, e) => RefreshDriveList();
             driveRefreshTimer.Start();
             RefreshDriveList();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            float scale = DpiScaler.GetDpiScale(this);
+            if (dpiScaler != null && (Math.Abs(scale - dpiScaler.CurrentScale) > 0.01f || Math.Abs(scale - 1.0f) > 0.01f))
+            {
+                dpiScaler.ApplyScale(scale);
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_DPICHANGED = 0x02E0;
+            if (m.Msg == WM_DPICHANGED)
+            {
+                int newDpi = (short)(m.WParam.ToInt32() & 0xFFFF);
+                if (newDpi > 0 && dpiScaler != null)
+                {
+                    if (m.LParam != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            var rect = (DpiScaler.RECT)Marshal.PtrToStructure(m.LParam, typeof(DpiScaler.RECT));
+                            this.SetBounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
+                        }
+                        catch { }
+                    }
+                    dpiScaler.ApplyScale(newDpi / 96.0f);
+                }
+            }
+            base.WndProc(ref m);
         }
 
         private void BtnBrowse_Click(object sender, EventArgs e)
@@ -462,6 +772,7 @@ namespace USBAutoCopy
                 {
                     txtBackupPath.Text = dialog.SelectedPath;
                     SaveSettings();
+                    appContext.UpdateBackupPath(dialog.SelectedPath);
                     AddLog($"📁 设置保存路径: {dialog.SelectedPath}");
                 }
             }
@@ -475,21 +786,12 @@ namespace USBAutoCopy
                 return;
             }
 
-            if (!Directory.Exists(txtBackupPath.Text))
+            if (!USBMonitor.IsPathReachable(txtBackupPath.Text))
             {
-                try
-                {
-                    Directory.CreateDirectory(txtBackupPath.Text);
-                    AddLog($"📁 创建保存目录: {txtBackupPath.Text}");
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"无法创建保存目录：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
+                AddLog($"⚠ 目标路径当前离线或不可达: {txtBackupPath.Text}。已开启监控，插入U盘将暂存本地并在网络恢复后自动同步。");
             }
 
-            appContext.StartMonitoring(null, null);
+            appContext.StartMonitoring(sender, e);
         }
 
         private void BtnStop_Click(object sender, EventArgs e)
@@ -676,6 +978,11 @@ namespace USBAutoCopy
             progressBar.Visible = show;
         }
 
+        public void ShowNotification(string title, string message)
+        {
+            appContext?.ShowNotification(title, message);
+        }
+
         private void LoadAutoStartStatus()
         {
             chkAutoStart.CheckedChanged -= ChkAutoStart_CheckedChanged;
@@ -685,13 +992,20 @@ namespace USBAutoCopy
 
         private void SaveSettings()
         {
-            Properties.Settings.Default.BackupPath = txtBackupPath.Text;
+            if (!string.IsNullOrEmpty(txtBackupPath.Text))
+            {
+                Properties.Settings.Default.BackupPath = txtBackupPath.Text;
+            }
         }
 
         private void LoadSettings()
         {
-            // 目前设置已在InitializeComponent中加载
-            // 未来可以在此加载其他设置项
+            string savedPath = Properties.Settings.Default.BackupPath;
+            if (!string.IsNullOrEmpty(savedPath))
+            {
+                // 无论目标路径在磁盘上是否存在（如网络驱动器离线），均完整保留用户已配置的路径，不得重置为空
+                txtBackupPath.Text = savedPath;
+            }
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -700,6 +1014,7 @@ namespace USBAutoCopy
             {
                 e.Cancel = true;
                 this.Hide();
+                this.ShowInTaskbar = false;
                 AddLog("程序已最小化到托盘，双击图标可重新打开");
             }
         }
@@ -709,11 +1024,12 @@ namespace USBAutoCopy
     {
         private ListBox lstBlocked;
         private Button btnRemove, btnClose;
+        private DpiScaler dpiScaler;
 
         public BlocklistForm()
         {
             this.Text = "屏蔽管理";
-            this.Size = new Size(400, 340);
+            this.ClientSize = new Size(385, 300);
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -751,10 +1067,47 @@ namespace USBAutoCopy
                 BackColor = Color.LightGray,
                 FlatStyle = FlatStyle.Flat
             };
-            btnClose.Click += (s, e) => this.Close();
+            lbl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            lstBlocked.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            btnRemove.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            btnClose.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
 
             this.Controls.AddRange(new Control[] { lbl, lstBlocked, btnRemove, btnClose });
+            dpiScaler = new DpiScaler(this);
             RefreshList();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            float scale = DpiScaler.GetDpiScale(this);
+            if (dpiScaler != null && (Math.Abs(scale - dpiScaler.CurrentScale) > 0.01f || Math.Abs(scale - 1.0f) > 0.01f))
+            {
+                dpiScaler.ApplyScale(scale);
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_DPICHANGED = 0x02E0;
+            if (m.Msg == WM_DPICHANGED)
+            {
+                int newDpi = (short)(m.WParam.ToInt32() & 0xFFFF);
+                if (newDpi > 0 && dpiScaler != null)
+                {
+                    if (m.LParam != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            var rect = (DpiScaler.RECT)Marshal.PtrToStructure(m.LParam, typeof(DpiScaler.RECT));
+                            this.SetBounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
+                        }
+                        catch { }
+                    }
+                    dpiScaler.ApplyScale(newDpi / 96.0f);
+                }
+            }
+            base.WndProc(ref m);
         }
 
         private void RefreshList()
@@ -792,6 +1145,11 @@ namespace USBAutoCopy
 
     public static class Program
     {
+#if WINDOWS
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+#endif
+
         [STAThread]
         static void Main()
         {
@@ -823,6 +1181,17 @@ namespace USBAutoCopy
                         return;
                     }
 
+#if WINDOWS
+                    try
+                    {
+                        if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                        {
+                            SetCurrentProcessExplicitAppUserModelID("RS114514.GetRickCourseware");
+                        }
+                    }
+                    catch { }
+#endif
+
                     try
                     {
                         var method = typeof(Application).GetMethod("SetHighDpiMode",
@@ -832,8 +1201,17 @@ namespace USBAutoCopy
                             var highDpiModeType = Type.GetType("System.Windows.Forms.HighDpiMode, System.Windows.Forms");
                             if (highDpiModeType != null)
                             {
-                                var systemAware = Enum.Parse(highDpiModeType, "SystemAware");
-                                method.Invoke(null, new object[] { systemAware });
+                                object mode = null;
+                                try { mode = Enum.Parse(highDpiModeType, "PerMonitorV2"); }
+                                catch { }
+                                if (mode == null)
+                                {
+                                    try { mode = Enum.Parse(highDpiModeType, "SystemAware"); } catch { }
+                                }
+                                if (mode != null)
+                                {
+                                    method.Invoke(null, new object[] { mode });
+                                }
                             }
                         }
                     }
