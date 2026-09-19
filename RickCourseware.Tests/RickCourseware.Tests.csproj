@@ -22,6 +22,7 @@
   <ItemGroup>
     <Compile Include="..\USBMonitor.cs" Link="USBMonitor.cs" />
     <Compile Include="..\Settings.cs" Link="Settings.cs" />
+    <Compile Include="..\BackupHistory.cs" Link="BackupHistory.cs" />
   </ItemGroup>
 
 </Project>

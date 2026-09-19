@@ -893,6 +893,11 @@ namespace USBAutoCopy
                             MoveOrMergeDirectory(dir, destFolder);
                             syncedFoldersCount++;
                             logCallback?.Invoke($"☁️ 本地暂存课件已同步至春晖 NAS: {folderName}");
+                            try
+                            {
+                                BackupHistoryManager.UpdateStatusByFolderName(folderName, "已同步", destFolder);
+                            }
+                            catch { }
                         }
                         catch (Exception ex)
                         {
@@ -1180,6 +1185,25 @@ namespace USBAutoCopy
                         else
                         {
                             logCallback?.Invoke($"✅ 课件获取完成！共复制 {copiedFiles} 个文件至春晖 NAS 目标目录");
+                        }
+
+                        try
+                        {
+                            var record = new BackupRecord
+                            {
+                                Id = Guid.NewGuid().ToString("N"),
+                                Timestamp = DateTime.Now,
+                                DriveLetter = driveLetterOnly,
+                                UsbName = usbName,
+                                FileCount = copiedFiles,
+                                TargetFolder = targetFolder,
+                                Status = isLocalCache ? "本地暂存" : "成功"
+                            };
+                            BackupHistoryManager.AddRecord(record);
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback?.Invoke($"⚠ 记录备份历史失败: {ex.Message}");
                         }
                     }
                     catch (Exception ex)

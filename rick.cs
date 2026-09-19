@@ -2,11 +2,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using System.Diagnostics;
 using Microsoft.Win32;
 
 namespace USBAutoCopy
@@ -34,6 +36,11 @@ namespace USBAutoCopy
                 // 创建托盘菜单
                 trayMenu = new ContextMenuStrip();
                 trayMenu.Items.Add("显示主窗口", null, ShowMainForm);
+                trayMenu.Items.Add("查看备份历史", null, (s, e) =>
+                {
+                    ShowMainForm(null, null);
+                    mainForm?.SwitchTab(1);
+                });
                 trayMenu.Items.Add("-");
                 trayMenu.Items.Add("启动监控", null, StartMonitoring);
                 trayMenu.Items.Add("停止监控", null, StopMonitoring);
@@ -317,6 +324,7 @@ namespace USBAutoCopy
         private float currentScale = 1.0f;
 
         public float CurrentScale => currentScale;
+        public event Action<float> OnScaleApplied;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
@@ -425,7 +433,7 @@ namespace USBAutoCopy
 
                 try
                 {
-                    c.Font = new Font(info.FontName, CalculateScaledFontSize(info.FontSize, scale), info.FontStyle);
+                    c.Font = new Font(info.FontName, CalculateScaledFontSize(info.FontSize, scale), c.Font != null ? c.Font.Style : info.FontStyle);
                 }
                 catch { }
             }
@@ -442,6 +450,30 @@ namespace USBAutoCopy
             }
 
             form.ResumeLayout(true);
+            try { OnScaleApplied?.Invoke(scale); } catch { }
+        }
+
+        public static GraphicsPath CreateRoundedRectanglePath(Rectangle rect, int radius)
+        {
+            var path = new GraphicsPath();
+            if (rect.Width <= 0 || rect.Height <= 0) return path;
+
+            int d = radius * 2;
+            if (d > rect.Width) d = rect.Width;
+            if (d > rect.Height) d = rect.Height;
+
+            if (d <= 0)
+            {
+                path.AddRectangle(rect);
+                return path;
+            }
+
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
 #if WINDOWS
@@ -531,8 +563,39 @@ namespace USBAutoCopy
         private Button btnBlockDrive, btnManageBlock;
         private Label lblLog;
         private System.Windows.Forms.Timer driveRefreshTimer;
-        private Dictionary<string, string> _driveMap = new Dictionary<string, string>(); // 显示文本 -> 唯一标识
+        private Dictionary<string, string> _driveMap = new Dictionary<string, string>();
         private DpiScaler dpiScaler;
+
+        // 现代化卡片式容器与历史记录控件
+        private Panel pnlHeader;
+        private PictureBox picLogo;
+        private Label lblAppTitle;
+        private Label lblAppSubtitle;
+        private Panel pnlStatusBadge;
+
+        private Panel pnlNav;
+        private Button btnTabMonitor;
+        private Button btnTabHistory;
+
+        private Panel pnlMonitorView;
+        private Panel cardConfig;
+        private Panel cardLog;
+        private Button btnOpenLogs;
+
+        private Panel pnlHistoryView;
+        private Panel cardHistory;
+        private Label lblHistorySummary;
+        private Label lblHistoryHint;
+        private Button btnOpenHistoryFolder;
+        private Button btnRefreshHistory;
+        private Button btnClearHistory;
+        private ListView lvHistory;
+
+        private static readonly int[] BaseHistoryColumnWidths = new int[] { 140, 120, 70, 80, 202 };
+        private bool _isMonitoringCurrently = false;
+        private Action _historyChangeHandler;
+        private int _sortColumn = -1;
+        private bool _sortAsc = true;
 
         public MainForm(USBAutoCopy context)
         {
@@ -550,176 +613,605 @@ namespace USBAutoCopy
             this.FormClosing += MainForm_FormClosing;
             this.Icon = USBAutoCopy.LoadAppIcon();
             this.ShowInTaskbar = false;
+            this.BackColor = ColorTranslator.FromHtml("#F8FAFC");
+            this.Font = new Font("微软雅黑", 9f, FontStyle.Regular);
 
-            lblPath = new Label() 
-            { 
-                Text = "课件保存文件夹:", 
-                Location = new Point(20, 20), 
-                Size = new Size(125, 25), 
-                Font = new Font("微软雅黑", 10, FontStyle.Bold) 
-            };
-            
-            txtBackupPath = new TextBox() 
-            { 
-                Location = new Point(150, 18), 
-                Size = new Size(420, 25), 
-                ReadOnly = true 
-            };
-            
-            btnBrowse = new Button() 
-            { 
-                Text = "浏览", 
-                Location = new Point(580, 17), 
-                Size = new Size(80, 28), 
-                BackColor = Color.LightBlue
-            };
-            btnBrowse.Click += BtnBrowse_Click;
-            
-            lblDriveInfo = new Label() 
-            { 
-                Text = "💡 提示：插入U盘后会自动复制，文件夹格式：日期_盘符_U盘名称", 
-                Location = new Point(20, 58), 
-                Size = new Size(640, 25), 
-                ForeColor = Color.Blue, 
-                Font = new Font("微软雅黑", 9) 
-            };
-            
-            chkAutoStart = new CheckBox()
+            // 1. 顶部现代化品牌与状态横幅
+            pnlHeader = new Panel()
             {
-                Text = "开机自动启动", 
-                Location = new Point(20, 95), 
-                Size = new Size(120, 25), 
-                Font = new Font("微软雅黑", 9) 
+                Location = new Point(0, 0),
+                Size = new Size(680, 64),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
-            chkAutoStart.CheckedChanged += ChkAutoStart_CheckedChanged;
-            
-            btnStart = new Button() 
-            { 
-                Text = "启动监控", 
-                Location = new Point(150, 92), 
-                Size = new Size(100, 35), 
-                BackColor = Color.LightGreen, 
-                FlatStyle = FlatStyle.Flat
-            };
-            btnStart.Click += BtnStart_Click;
-            
-            btnStop = new Button() 
-            { 
-                Text = "停止监控", 
-                Location = new Point(260, 92), 
-                Size = new Size(100, 35), 
-                BackColor = Color.LightCoral, 
-                Enabled = false, 
-                FlatStyle = FlatStyle.Flat
-            };
-            btnStop.Click += BtnStop_Click;
-            
-            lblStatus = new Label() 
-            { 
-                Text = "状态: 未监控", 
-                Location = new Point(380, 100), 
-                Size = new Size(150, 25), 
-                ForeColor = Color.Red, 
-                Font = new Font("微软雅黑", 9, FontStyle.Bold) 
+            pnlHeader.Paint += (s, pe) =>
+            {
+                using (var pen = new Pen(ColorTranslator.FromHtml("#E2E8F0"), 1))
+                {
+                    pe.Graphics.DrawLine(pen, 0, pnlHeader.Height - 1, pnlHeader.Width, pnlHeader.Height - 1);
+                }
             };
 
-            // U盘选择行
+            picLogo = new PictureBox()
+            {
+                Location = new Point(16, 14),
+                Size = new Size(36, 36),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Transparent
+            };
+            try
+            {
+                var icon = USBAutoCopy.LoadAppIcon();
+                if (icon != null) picLogo.Image = icon.ToBitmap();
+            }
+            catch { }
+
+            lblAppTitle = new Label()
+            {
+                Text = "获取Rick课件",
+                Location = new Point(60, 12),
+                Size = new Size(180, 22),
+                Font = new Font("微软雅黑", 12f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#0F172A")
+            };
+
+            lblAppSubtitle = new Label()
+            {
+                Text = "春晖中学课件智能备份与同步系统",
+                Location = new Point(60, 36),
+                Size = new Size(260, 18),
+                Font = new Font("微软雅黑", 8.5f, FontStyle.Regular),
+                ForeColor = ColorTranslator.FromHtml("#64748B")
+            };
+
+            pnlStatusBadge = new Panel()
+            {
+                Location = new Point(504, 16),
+                Size = new Size(158, 32),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            pnlStatusBadge.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = dpiScaler != null ? dpiScaler.CurrentScale : 1.0f;
+                int radius = (int)Math.Round(12 * scale);
+                var rect = new Rectangle(0, 0, pnlStatusBadge.Width - 1, pnlStatusBadge.Height - 1);
+                using (var path = DpiScaler.CreateRoundedRectanglePath(rect, radius))
+                using (var brush = new SolidBrush(_isMonitoringCurrently ? ColorTranslator.FromHtml("#DEF7EC") : ColorTranslator.FromHtml("#F1F5F9")))
+                using (var pen = new Pen(_isMonitoringCurrently ? ColorTranslator.FromHtml("#A7F3D0") : ColorTranslator.FromHtml("#CBD5E1"), 1))
+                {
+                    pe.Graphics.FillPath(brush, path);
+                    pe.Graphics.DrawPath(pen, path);
+                }
+            };
+
+            lblStatus = new Label()
+            {
+                Text = "○ 监控已停止",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#64748B"),
+                BackColor = Color.Transparent
+            };
+            pnlStatusBadge.Controls.Add(lblStatus);
+            pnlHeader.Controls.AddRange(new Control[] { picLogo, lblAppTitle, lblAppSubtitle, pnlStatusBadge });
+
+            // 2. 导航切换选项卡 (Segmented Switcher)
+            pnlNav = new Panel()
+            {
+                Location = new Point(18, 70),
+                Size = new Size(644, 34),
+                BackColor = Color.Transparent,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            btnTabMonitor = new Button()
+            {
+                Text = "⚡ 实时监控",
+                Location = new Point(0, 0),
+                Size = new Size(115, 32),
+                BackColor = Color.White,
+                ForeColor = ColorTranslator.FromHtml("#0F172A"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnTabMonitor.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+            btnTabMonitor.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#F8FAFC");
+            btnTabMonitor.Click += (s, e) => SwitchTab(0);
+
+            btnTabHistory = new Button()
+            {
+                Text = "📋 备份历史 (0)",
+                Location = new Point(122, 0),
+                Size = new Size(135, 32),
+                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
+                ForeColor = ColorTranslator.FromHtml("#64748B"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Regular),
+                Cursor = Cursors.Hand
+            };
+            btnTabHistory.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnTabHistory.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnTabHistory.Click += (s, e) => SwitchTab(1);
+
+            pnlNav.Controls.AddRange(new Control[] { btnTabMonitor, btnTabHistory });
+
+            // 3. 监控视图容器
+            pnlMonitorView = new Panel()
+            {
+                Location = new Point(18, 110),
+                Size = new Size(644, 506),
+                BackColor = Color.Transparent,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            // 3.1 监控配置卡片
+            cardConfig = new Panel()
+            {
+                Location = new Point(0, 0),
+                Size = new Size(644, 156),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            cardConfig.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = dpiScaler != null ? dpiScaler.CurrentScale : 1.0f;
+                int radius = (int)Math.Round(8 * scale);
+                var rect = new Rectangle(0, 0, cardConfig.Width - 1, cardConfig.Height - 1);
+                using (var path = DpiScaler.CreateRoundedRectanglePath(rect, radius))
+                using (var pen = new Pen(ColorTranslator.FromHtml("#E2E8F0"), 1))
+                {
+                    pe.Graphics.DrawPath(pen, path);
+                }
+            };
+
+            lblPath = new Label()
+            {
+                Text = "保存目录:",
+                Location = new Point(16, 16),
+                Size = new Size(72, 22),
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#334155")
+            };
+
+            txtBackupPath = new TextBox()
+            {
+                Location = new Point(90, 14),
+                Size = new Size(450, 24),
+                ReadOnly = true,
+                BackColor = ColorTranslator.FromHtml("#F8FAFC"),
+                ForeColor = ColorTranslator.FromHtml("#1E293B"),
+                Font = new Font("微软雅黑", 9f),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            btnBrowse = new Button()
+            {
+                Text = "浏览...",
+                Location = new Point(548, 13),
+                Size = new Size(80, 26),
+                BackColor = ColorTranslator.FromHtml("#EFF6FF"),
+                ForeColor = ColorTranslator.FromHtml("#1D4ED8"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnBrowse.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#BFDBFE");
+            btnBrowse.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#DBEAFE");
+            btnBrowse.Click += BtnBrowse_Click;
+
             lblDriveSelect = new Label()
             {
-                Text = "当前U盘:", 
-                Location = new Point(20, 140), 
-                Size = new Size(70, 25), 
-                Font = new Font("微软雅黑", 9, FontStyle.Bold) 
+                Text = "当前U盘:",
+                Location = new Point(16, 50),
+                Size = new Size(72, 22),
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#334155")
             };
 
             cmbDrives = new ComboBox()
             {
-                Location = new Point(95, 138), 
-                Size = new Size(335, 25), 
-                DropDownStyle = ComboBoxStyle.DropDownList, 
-                Font = new Font("微软雅黑", 9) 
+                Location = new Point(90, 48),
+                Size = new Size(340, 24),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font("微软雅黑", 9f)
             };
 
             btnBlockDrive = new Button()
             {
-                Text = "屏蔽此U盘", 
-                Location = new Point(440, 137), 
-                Size = new Size(105, 28), 
-                BackColor = Color.Orange, 
-                FlatStyle = FlatStyle.Flat
+                Text = "🚫 屏蔽此盘",
+                Location = new Point(438, 47),
+                Size = new Size(98, 26),
+                BackColor = ColorTranslator.FromHtml("#FEF3C7"),
+                ForeColor = ColorTranslator.FromHtml("#92400E"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand
             };
+            btnBlockDrive.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#FDE68A");
+            btnBlockDrive.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#FDE68A");
             btnBlockDrive.Click += BtnBlockDrive_Click;
 
             btnManageBlock = new Button()
             {
-                Text = "屏蔽管理", 
-                Location = new Point(555, 137), 
-                Size = new Size(105, 28), 
-                BackColor = Color.LightGray, 
-                FlatStyle = FlatStyle.Flat
+                Text = "屏蔽管理",
+                Location = new Point(544, 47),
+                Size = new Size(84, 26),
+                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
+                ForeColor = ColorTranslator.FromHtml("#475569"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand
             };
+            btnManageBlock.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+            btnManageBlock.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
             btnManageBlock.Click += BtnManageBlock_Click;
 
-            lblLog = new Label() 
-            { 
-                Text = "运行日志:", 
-                Location = new Point(20, 178), 
-                Size = new Size(80, 25), 
-                Font = new Font("微软雅黑", 10, FontStyle.Bold) 
-            };
-            
-            btnClearLog = new Button()
+            chkAutoStart = new CheckBox()
             {
-                Text = "清空日志", 
-                Location = new Point(580, 176), 
-                Size = new Size(80, 25), 
-                BackColor = Color.LightGray
+                Text = "开机自动启动",
+                Location = new Point(16, 86),
+                Size = new Size(110, 24),
+                Font = new Font("微软雅黑", 9f),
+                ForeColor = ColorTranslator.FromHtml("#334155")
             };
-            btnClearLog.Click += BtnClearLog_Click;
-            
-            lstLog = new ListBox() 
-            { 
-                Location = new Point(20, 208), 
-                Size = new Size(640, 380), 
-                Font = new Font("Consolas", 9), 
-                BackColor = Color.Black, 
-                ForeColor = Color.LightGreen
+            chkAutoStart.CheckedChanged += ChkAutoStart_CheckedChanged;
+
+            btnStart = new Button()
+            {
+                Text = "▶ 启动监控",
+                Location = new Point(135, 82),
+                Size = new Size(100, 32),
+                BackColor = ColorTranslator.FromHtml("#2563EB"),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
             };
-            
-            progressBar = new ProgressBar() 
-            { 
-                Location = new Point(20, 598), 
-                Size = new Size(640, 20), 
-                Style = ProgressBarStyle.Marquee, 
-                Visible = false 
+            btnStart.FlatAppearance.BorderSize = 0;
+            btnStart.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#1D4ED8");
+            btnStart.Click += BtnStart_Click;
+
+            btnStop = new Button()
+            {
+                Text = "⏹ 停止监控",
+                Location = new Point(245, 82),
+                Size = new Size(100, 32),
+                BackColor = ColorTranslator.FromHtml("#EF4444"),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Bold),
+                Enabled = false,
+                Cursor = Cursors.Hand
+            };
+            btnStop.FlatAppearance.BorderSize = 0;
+            btnStop.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#DC2626");
+            btnStop.Click += BtnStop_Click;
+
+            lblDriveInfo = new Label()
+            {
+                Text = "💡 插入U盘即自动静默备份；网络离线自动暂存并在恢复后自动同步",
+                Location = new Point(16, 124),
+                Size = new Size(612, 18),
+                ForeColor = ColorTranslator.FromHtml("#64748B"),
+                Font = new Font("微软雅黑", 8.5f)
             };
 
-            // 配置合理的 Anchor 锚定
             lblPath.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             txtBackupPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             btnBrowse.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            lblDriveInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            chkAutoStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            lblStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             lblDriveSelect.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             cmbDrives.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             btnBlockDrive.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnManageBlock.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            lblLog.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            btnClearLog.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            lstLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            progressBar.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            chkAutoStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            lblDriveInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-            this.Controls.AddRange(new Control[] { 
-                lblPath, txtBackupPath, btnBrowse, lblDriveInfo, 
-                chkAutoStart, btnStart, btnStop, lblStatus,
+            cardConfig.Controls.AddRange(new Control[] {
+                lblPath, txtBackupPath, btnBrowse,
                 lblDriveSelect, cmbDrives, btnBlockDrive, btnManageBlock,
-                lblLog, btnClearLog, lstLog, progressBar 
+                chkAutoStart, btnStart, btnStop, lblDriveInfo
             });
 
+            // 3.2 运行日志卡片 (现代浅灰底，深蓝灰文字)
+            cardLog = new Panel()
+            {
+                Location = new Point(0, 164),
+                Size = new Size(644, 332),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+            cardLog.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = dpiScaler != null ? dpiScaler.CurrentScale : 1.0f;
+                int radius = (int)Math.Round(8 * scale);
+                var rect = new Rectangle(0, 0, cardLog.Width - 1, cardLog.Height - 1);
+                using (var path = DpiScaler.CreateRoundedRectanglePath(rect, radius))
+                using (var pen = new Pen(ColorTranslator.FromHtml("#E2E8F0"), 1))
+                {
+                    pe.Graphics.DrawPath(pen, path);
+                }
+            };
+
+            lblLog = new Label()
+            {
+                Text = "运行日志",
+                Location = new Point(16, 10),
+                Size = new Size(80, 20),
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#1E293B"),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+
+            btnOpenLogs = new Button()
+            {
+                Text = "打开日志目录",
+                Location = new Point(440, 7),
+                Size = new Size(100, 24),
+                BackColor = ColorTranslator.FromHtml("#F8FAFC"),
+                ForeColor = ColorTranslator.FromHtml("#475569"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 8.5f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnOpenLogs.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnOpenLogs.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnOpenLogs.Click += (s, e) =>
+            {
+                try
+                {
+                    string dir = GetLogsDirectory();
+                    OpenFolderInExplorer(dir);
+                }
+                catch { }
+            };
+
+            btnClearLog = new Button()
+            {
+                Text = "清空日志",
+                Location = new Point(548, 7),
+                Size = new Size(80, 24),
+                BackColor = ColorTranslator.FromHtml("#F8FAFC"),
+                ForeColor = ColorTranslator.FromHtml("#475569"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 8.5f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnClearLog.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnClearLog.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnClearLog.Click += BtnClearLog_Click;
+
+            lstLog = new ListBox()
+            {
+                Location = new Point(16, 36),
+                Size = new Size(612, 282),
+                Font = new Font("Consolas", 9f),
+                BackColor = ColorTranslator.FromHtml("#F8FAFC"),
+                ForeColor = ColorTranslator.FromHtml("#1E293B"),
+                BorderStyle = BorderStyle.FixedSingle,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            cardLog.Controls.AddRange(new Control[] { lblLog, btnOpenLogs, btnClearLog, lstLog });
+
+            progressBar = new ProgressBar()
+            {
+                Location = new Point(0, 500),
+                Size = new Size(644, 6),
+                Style = ProgressBarStyle.Marquee,
+                Visible = false,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            pnlMonitorView.Controls.AddRange(new Control[] { cardConfig, cardLog, progressBar });
+
+            // 4. 备份历史视图容器
+            pnlHistoryView = new Panel()
+            {
+                Location = new Point(18, 110),
+                Size = new Size(644, 506),
+                BackColor = Color.Transparent,
+                Visible = false,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            cardHistory = new Panel()
+            {
+                Location = new Point(0, 0),
+                Size = new Size(644, 506),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+            cardHistory.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = dpiScaler != null ? dpiScaler.CurrentScale : 1.0f;
+                int radius = (int)Math.Round(8 * scale);
+                var rect = new Rectangle(0, 0, cardHistory.Width - 1, cardHistory.Height - 1);
+                using (var path = DpiScaler.CreateRoundedRectanglePath(rect, radius))
+                using (var pen = new Pen(ColorTranslator.FromHtml("#E2E8F0"), 1))
+                {
+                    pe.Graphics.DrawPath(pen, path);
+                }
+            };
+
+            lblHistorySummary = new Label()
+            {
+                Text = "累计备份 0 次 · 成功 0 · 本地暂存 0 · 已同步 0",
+                Location = new Point(16, 12),
+                Size = new Size(320, 22),
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#334155"),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+
+            btnOpenHistoryFolder = new Button()
+            {
+                Text = "📂 打开所在文件夹",
+                Location = new Point(340, 8),
+                Size = new Size(130, 26),
+                BackColor = ColorTranslator.FromHtml("#2563EB"),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnOpenHistoryFolder.FlatAppearance.BorderSize = 0;
+            btnOpenHistoryFolder.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#1D4ED8");
+            btnOpenHistoryFolder.Click += (s, e) => OpenSelectedHistoryFolder();
+
+            btnRefreshHistory = new Button()
+            {
+                Text = "🔄 刷新",
+                Location = new Point(478, 8),
+                Size = new Size(70, 26),
+                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
+                ForeColor = ColorTranslator.FromHtml("#334155"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnRefreshHistory.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+            btnRefreshHistory.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnRefreshHistory.Click += (s, e) => RefreshHistoryView();
+
+            btnClearHistory = new Button()
+            {
+                Text = "🧹 清空",
+                Location = new Point(556, 8),
+                Size = new Size(72, 26),
+                BackColor = ColorTranslator.FromHtml("#FEE2E2"),
+                ForeColor = ColorTranslator.FromHtml("#DC2626"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnClearHistory.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#FECACA");
+            btnClearHistory.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#FEE2E2");
+            btnClearHistory.Click += (s, e) =>
+            {
+                if (MessageBox.Show("确定要清空所有课件备份历史记录吗？\n（注：这不会删除磁盘中已备份的课件文件）",
+                    "清空历史确认", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                {
+                    BackupHistoryManager.ClearHistory();
+                    RefreshHistoryView();
+                }
+            };
+
+            lvHistory = new ListView()
+            {
+                Location = new Point(16, 42),
+                Size = new Size(612, 434),
+                View = View.Details,
+                FullRowSelect = true,
+                MultiSelect = false,
+                GridLines = true,
+                Font = new Font("微软雅黑", 9f),
+                BackColor = Color.White,
+                ForeColor = ColorTranslator.FromHtml("#1E293B"),
+                BorderStyle = BorderStyle.FixedSingle,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+            SetDoubleBuffered(lvHistory);
+            lvHistory.Columns.Add("备份时间", 140);
+            lvHistory.Columns.Add("设备 / U盘", 120);
+            lvHistory.Columns.Add("文件数", 70);
+            lvHistory.Columns.Add("状态", 80);
+            lvHistory.Columns.Add("目标文件夹路径", 202);
+            lvHistory.DoubleClick += (s, e) => OpenSelectedHistoryFolder();
+            lvHistory.Resize += (s, e) => AutoResizeHistoryColumns();
+            lvHistory.ColumnClick += LvHistory_ColumnClick;
+
+            var historyMenu = new ContextMenuStrip();
+            historyMenu.Items.Add("📂 打开所在文件夹", null, (s, e) => OpenSelectedHistoryFolder());
+            historyMenu.Items.Add("📋 复制目标路径", null, (s, e) =>
+            {
+                if (lvHistory.SelectedItems.Count > 0)
+                {
+                    var record = lvHistory.SelectedItems[0].Tag as BackupRecord;
+                    if (record != null && !string.IsNullOrEmpty(record.TargetFolder))
+                    {
+                        try { Clipboard.SetText(record.TargetFolder); } catch { }
+                    }
+                }
+            });
+            historyMenu.Items.Add("🗑 删除此条记录", null, (s, e) =>
+            {
+                if (lvHistory.SelectedItems.Count > 0)
+                {
+                    var record = lvHistory.SelectedItems[0].Tag as BackupRecord;
+                    if (record != null)
+                    {
+                        BackupHistoryManager.DeleteRecord(record.Id);
+                        RefreshHistoryView();
+                    }
+                }
+            });
+            historyMenu.Items.Add("-");
+            historyMenu.Items.Add("🔄 刷新列表", null, (s, e) => RefreshHistoryView());
+            historyMenu.Items.Add("🧹 清空所有历史", null, (s, e) =>
+            {
+                if (MessageBox.Show("确定要清空所有课件备份历史记录吗？", "清空确认", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                {
+                    BackupHistoryManager.ClearHistory();
+                    RefreshHistoryView();
+                }
+            });
+            lvHistory.ContextMenuStrip = historyMenu;
+
+            lblHistoryHint = new Label()
+            {
+                Text = "💡 双击条目可直接打开对应课件文件夹；网络连通后本地暂存课件会自动同步至云上春晖",
+                Location = new Point(16, 482),
+                Size = new Size(612, 18),
+                ForeColor = ColorTranslator.FromHtml("#64748B"),
+                Font = new Font("微软雅黑", 8.5f),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            cardHistory.Controls.AddRange(new Control[] {
+                lblHistorySummary, btnOpenHistoryFolder, btnRefreshHistory, btnClearHistory,
+                lvHistory, lblHistoryHint
+            });
+            pnlHistoryView.Controls.Add(cardHistory);
+
+            this.Controls.AddRange(new Control[] { pnlHeader, pnlNav, pnlMonitorView, pnlHistoryView });
+
             dpiScaler = new DpiScaler(this);
+            dpiScaler.OnScaleApplied += (scale) =>
+            {
+                if (lvHistory != null && lvHistory.Columns.Count >= BaseHistoryColumnWidths.Length)
+                {
+                    for (int i = 0; i < BaseHistoryColumnWidths.Length; i++)
+                    {
+                        lvHistory.Columns[i].Width = (int)Math.Round(BaseHistoryColumnWidths[i] * scale);
+                    }
+                    AutoResizeHistoryColumns();
+                }
+            };
+
+            // 监听历史记录数据变更
+            _historyChangeHandler = () =>
+            {
+                if (this.IsHandleCreated && !this.IsDisposed)
+                {
+                    try { this.BeginInvoke(new Action(RefreshHistoryView)); } catch { }
+                }
+            };
+            BackupHistoryManager.OnHistoryChanged += _historyChangeHandler;
+            RefreshHistoryView();
 
             // 定时刷新 U 盘列表
             driveRefreshTimer = new System.Windows.Forms.Timer();
@@ -727,6 +1219,212 @@ namespace USBAutoCopy
             driveRefreshTimer.Tick += (s, e) => RefreshDriveList();
             driveRefreshTimer.Start();
             RefreshDriveList();
+        }
+
+        public void SwitchTab(int tabIndex)
+        {
+            if (tabIndex == 0)
+            {
+                pnlMonitorView.Visible = true;
+                pnlHistoryView.Visible = false;
+                btnTabMonitor.BackColor = Color.White;
+                btnTabMonitor.ForeColor = ColorTranslator.FromHtml("#0F172A");
+                btnTabMonitor.Font = new Font(btnTabMonitor.Font, FontStyle.Bold);
+                btnTabMonitor.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+
+                btnTabHistory.BackColor = ColorTranslator.FromHtml("#F1F5F9");
+                btnTabHistory.ForeColor = ColorTranslator.FromHtml("#64748B");
+                btnTabHistory.Font = new Font(btnTabHistory.Font, FontStyle.Regular);
+                btnTabHistory.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#E2E8F0");
+            }
+            else
+            {
+                pnlMonitorView.Visible = false;
+                pnlHistoryView.Visible = true;
+                btnTabHistory.BackColor = Color.White;
+                btnTabHistory.ForeColor = ColorTranslator.FromHtml("#0F172A");
+                btnTabHistory.Font = new Font(btnTabHistory.Font, FontStyle.Bold);
+                btnTabHistory.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+
+                btnTabMonitor.BackColor = ColorTranslator.FromHtml("#F1F5F9");
+                btnTabMonitor.ForeColor = ColorTranslator.FromHtml("#64748B");
+                btnTabMonitor.Font = new Font(btnTabMonitor.Font, FontStyle.Regular);
+                btnTabMonitor.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#E2E8F0");
+
+                pnlHistoryView.PerformLayout();
+                cardHistory.PerformLayout();
+                RefreshHistoryView();
+            }
+        }
+
+        private void AutoResizeHistoryColumns()
+        {
+            if (lvHistory != null && lvHistory.Columns.Count >= 5)
+            {
+                float scale = dpiScaler != null ? dpiScaler.CurrentScale : 1.0f;
+                int minPathWidth = (int)Math.Round(BaseHistoryColumnWidths[4] * scale);
+                int totalWidth = lvHistory.ClientSize.Width;
+                int fixedWidths = lvHistory.Columns[0].Width + lvHistory.Columns[1].Width + 
+                                   lvHistory.Columns[2].Width + lvHistory.Columns[3].Width;
+                int targetWidth = totalWidth - fixedWidths - 4;
+                lvHistory.Columns[4].Width = Math.Max(minPathWidth, targetWidth);
+            }
+        }
+
+        public void RefreshHistoryView()
+        {
+            if (lvHistory == null) return;
+            if (lvHistory.InvokeRequired)
+            {
+                try { lvHistory.BeginInvoke(new Action(RefreshHistoryView)); } catch { }
+                return;
+            }
+
+            var records = BackupHistoryManager.LoadHistory();
+            lvHistory.BeginUpdate();
+            var prevSorter = lvHistory.ListViewItemSorter;
+            lvHistory.ListViewItemSorter = null;
+            lvHistory.Items.Clear();
+
+            int successCount = 0;
+            int cachedCount = 0;
+            int syncedCount = 0;
+
+            foreach (var r in records)
+            {
+                var item = new ListViewItem(r.FormattedTime);
+                item.SubItems.Add(r.DeviceDisplay);
+                item.SubItems.Add($"{r.FileCount} 个文件");
+
+                var statusSub = item.SubItems.Add(r.Status);
+                item.SubItems.Add(r.TargetFolder);
+                item.Tag = r;
+
+                item.UseItemStyleForSubItems = false;
+                if (string.Equals(r.Status, "成功", StringComparison.OrdinalIgnoreCase))
+                {
+                    statusSub.ForeColor = ColorTranslator.FromHtml("#059669");
+                    successCount++;
+                }
+                else if (string.Equals(r.Status, "本地暂存", StringComparison.OrdinalIgnoreCase))
+                {
+                    statusSub.ForeColor = ColorTranslator.FromHtml("#D97706");
+                    cachedCount++;
+                }
+                else if (string.Equals(r.Status, "已同步", StringComparison.OrdinalIgnoreCase))
+                {
+                    statusSub.ForeColor = ColorTranslator.FromHtml("#2563EB");
+                    syncedCount++;
+                }
+                else if (string.Equals(r.Status, "失败", StringComparison.OrdinalIgnoreCase))
+                {
+                    statusSub.ForeColor = ColorTranslator.FromHtml("#DC2626");
+                }
+
+                lvHistory.Items.Add(item);
+            }
+
+            if (prevSorter != null)
+            {
+                lvHistory.ListViewItemSorter = prevSorter;
+                lvHistory.Sort();
+            }
+            lvHistory.EndUpdate();
+
+            int total = records.Count;
+            lblHistorySummary.Text = $"累计备份 {total} 次 · 成功 {successCount} · 本地暂存 {cachedCount} · 已同步 {syncedCount}";
+            btnTabHistory.Text = $"📋 备份历史 ({total})";
+            AutoResizeHistoryColumns();
+        }
+
+        public static void OpenFolderInExplorer(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            string target = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(target) || !Directory.Exists(target))
+            {
+                throw new DirectoryNotFoundException($"目标文件夹当前不存在或网络不可达：\n{path}");
+            }
+
+            string safeTarget = target.TrimEnd('\\', '/');
+            if (safeTarget.Length == 2 && safeTarget[1] == ':')
+            {
+                safeTarget += "\\";
+            }
+
+            try
+            {
+                bool isWin = Environment.OSVersion.Platform == PlatformID.Win32NT;
+                if (isWin)
+                {
+                    string args = safeTarget.EndsWith("\\") ? $"\"{safeTarget}\\\"" : $"\"{safeTarget}\"";
+                    Process.Start("explorer.exe", args);
+                }
+                else if (File.Exists("/usr/bin/open"))
+                {
+                    Process.Start("/usr/bin/open", $"\"{safeTarget}\"");
+                }
+                else
+                {
+                    Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true });
+                }
+            }
+            catch
+            {
+                Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true });
+            }
+        }
+
+        private void OpenSelectedHistoryFolder()
+        {
+            if (lvHistory.SelectedItems.Count == 0)
+            {
+                MessageBox.Show("请先在列表中选中一条课件备份记录！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var record = lvHistory.SelectedItems[0].Tag as BackupRecord;
+            if (record == null || string.IsNullOrEmpty(record.TargetFolder))
+            {
+                MessageBox.Show("所选记录的目标文件夹路径为空！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                OpenFolderInExplorer(record.TargetFolder);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"打开文件夹失败：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private static void SetDoubleBuffered(Control control)
+        {
+            try
+            {
+                var prop = typeof(Control).GetProperty("DoubleBuffered", 
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                prop?.SetValue(control, true, null);
+            }
+            catch { }
+        }
+
+        private void LvHistory_ColumnClick(object sender, ColumnClickEventArgs e)
+        {
+            if (e.Column == _sortColumn)
+            {
+                _sortAsc = !_sortAsc;
+            }
+            else
+            {
+                _sortColumn = e.Column;
+                _sortAsc = true;
+            }
+
+            lvHistory.ListViewItemSorter = new ListViewItemComparer(_sortColumn, _sortAsc);
+            lvHistory.Sort();
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -851,7 +1549,6 @@ namespace USBAutoCopy
 
             if (!_driveMap.TryGetValue(display, out string uniqueId)) return;
 
-            // 提取友好显示名（去掉 [已屏蔽]）
             string friendlyName = display.Replace(" [已屏蔽]", "").Trim();
 
             var blocked = Properties.Settings.Default.GetBlockedList();
@@ -950,10 +1647,23 @@ namespace USBAutoCopy
                 return;
             }
 
+            _isMonitoringCurrently = isMonitoring;
             btnStart.Enabled = !isMonitoring;
             btnStop.Enabled = isMonitoring;
-            lblStatus.Text = isMonitoring ? "状态: 监控中 ✓" : "状态: 未监控 ✗";
-            lblStatus.ForeColor = isMonitoring ? Color.Green : Color.Red;
+
+            if (isMonitoring)
+            {
+                lblStatus.Text = "● 正在实时监控";
+                lblStatus.ForeColor = ColorTranslator.FromHtml("#03543F");
+                pnlStatusBadge.BackColor = ColorTranslator.FromHtml("#DEF7EC");
+            }
+            else
+            {
+                lblStatus.Text = "○ 监控已停止";
+                lblStatus.ForeColor = ColorTranslator.FromHtml("#64748B");
+                pnlStatusBadge.BackColor = ColorTranslator.FromHtml("#F1F5F9");
+            }
+            pnlStatusBadge.Invalidate();
         }
 
         public void UpdateAutoStartStatus(bool isEnabled)
@@ -1003,8 +1713,16 @@ namespace USBAutoCopy
             string savedPath = Properties.Settings.Default.BackupPath;
             if (!string.IsNullOrEmpty(savedPath))
             {
-                // 无论目标路径在磁盘上是否存在（如网络驱动器离线），均完整保留用户已配置的路径，不得重置为空
                 txtBackupPath.Text = savedPath;
+            }
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (this.Visible)
+            {
+                RefreshHistoryView();
             }
         }
 
@@ -1033,20 +1751,26 @@ namespace USBAutoCopy
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
+            this.BackColor = ColorTranslator.FromHtml("#F8FAFC");
+            this.Font = new Font("微软雅黑", 9f, FontStyle.Regular);
 
             Label lbl = new Label()
             {
                 Text = "已屏蔽的 U 盘（选中后可解除屏蔽）:",
                 Location = new Point(15, 15),
                 Size = new Size(360, 20),
-                Font = new Font("微软雅黑", 9)
+                Font = new Font("微软雅黑", 9.5f, FontStyle.Bold),
+                ForeColor = ColorTranslator.FromHtml("#1E293B")
             };
 
             lstBlocked = new ListBox()
             {
                 Location = new Point(15, 40),
                 Size = new Size(355, 200),
-                Font = new Font("微软雅黑", 9)
+                Font = new Font("微软雅黑", 9f),
+                BackColor = Color.White,
+                ForeColor = ColorTranslator.FromHtml("#1E293B"),
+                BorderStyle = BorderStyle.FixedSingle
             };
 
             btnRemove = new Button()
@@ -1054,9 +1778,13 @@ namespace USBAutoCopy
                 Text = "解除屏蔽",
                 Location = new Point(15, 255),
                 Size = new Size(110, 32),
-                BackColor = Color.LightGreen,
-                FlatStyle = FlatStyle.Flat
+                BackColor = ColorTranslator.FromHtml("#DEF7EC"),
+                ForeColor = ColorTranslator.FromHtml("#03543F"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f, FontStyle.Bold),
+                Cursor = Cursors.Hand
             };
+            btnRemove.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#A7F3D0");
             btnRemove.Click += BtnRemove_Click;
 
             btnClose = new Button()
@@ -1064,9 +1792,15 @@ namespace USBAutoCopy
                 Text = "关闭",
                 Location = new Point(260, 255),
                 Size = new Size(110, 32),
-                BackColor = Color.LightGray,
-                FlatStyle = FlatStyle.Flat
+                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
+                ForeColor = ColorTranslator.FromHtml("#475569"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand
             };
+            btnClose.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+            btnClose.Click += (s, e) => this.Close();
+
             lbl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             lstBlocked.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             btnRemove.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
@@ -1115,7 +1849,6 @@ namespace USBAutoCopy
             lstBlocked.Items.Clear();
             foreach (var item in Properties.Settings.Default.GetBlockedList())
             {
-                // 显示卷标部分（| 前），序列号作为内部标识
                 string display = item.Contains("|") ? item.Split('|')[0] + $"（序列号: {item.Split('|')[1]}）" : item;
                 lstBlocked.Items.Add(new BlocklistItem(display, item));
             }
@@ -1141,13 +1874,118 @@ namespace USBAutoCopy
         }
     }
 
+    public class ListViewItemComparer : System.Collections.IComparer
+    {
+        private readonly int _col;
+        private readonly bool _asc;
 
+        public ListViewItemComparer(int column, bool ascending)
+        {
+            _col = column;
+            _asc = ascending;
+        }
+
+        public int Column => _col;
+        public bool Ascending => _asc;
+
+        public int Compare(object x, object y)
+        {
+            var itemX = x as ListViewItem;
+            var itemY = y as ListViewItem;
+            if (itemX == null && itemY == null) return 0;
+            if (itemX == null) return _asc ? -1 : 1;
+            if (itemY == null) return _asc ? 1 : -1;
+
+            var recX = itemX.Tag as BackupRecord;
+            var recY = itemY.Tag as BackupRecord;
+
+            int result = 0;
+            if (recX != null && recY != null)
+            {
+                switch (_col)
+                {
+                    case 0:
+                        result = DateTime.Compare(recX.Timestamp, recY.Timestamp);
+                        break;
+                    case 1:
+                        result = string.Compare(recX.DeviceDisplay, recY.DeviceDisplay, StringComparison.CurrentCultureIgnoreCase);
+                        break;
+                    case 2:
+                        result = recX.FileCount.CompareTo(recY.FileCount);
+                        break;
+                    case 3:
+                        result = string.Compare(recX.Status, recY.Status, StringComparison.CurrentCultureIgnoreCase);
+                        break;
+                    case 4:
+                        result = string.Compare(recX.TargetFolder, recY.TargetFolder, StringComparison.CurrentCultureIgnoreCase);
+                        break;
+                    default:
+                        result = 0;
+                        break;
+                }
+            }
+            else
+            {
+                string textX = _col < itemX.SubItems.Count ? itemX.SubItems[_col].Text : "";
+                string textY = _col < itemY.SubItems.Count ? itemY.SubItems[_col].Text : "";
+
+                if (_col == 0 && DateTime.TryParse(textX, out DateTime dtX) && DateTime.TryParse(textY, out DateTime dtY))
+                {
+                    result = DateTime.Compare(dtX, dtY);
+                }
+                else if (_col == 2)
+                {
+                    int numX = ExtractFirstNumber(textX);
+                    int numY = ExtractFirstNumber(textY);
+                    result = numX.CompareTo(numY);
+                }
+                else
+                {
+                    result = string.Compare(textX, textY, StringComparison.CurrentCultureIgnoreCase);
+                }
+            }
+
+            return _asc ? result : -result;
+        }
+
+        private static int ExtractFirstNumber(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return 0;
+            int num = 0;
+            bool found = false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (char.IsDigit(text[i]))
+                {
+                    num = num * 10 + (text[i] - '0');
+                    found = true;
+                }
+                else if (found)
+                {
+                    break;
+                }
+            }
+            return num;
+        }
+    }
 
     public static class Program
     {
 #if WINDOWS
         [DllImport("shell32.dll", SetLastError = true)]
         private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+        [DllImport("shcore.dll", SetLastError = true)]
+        private static extern int SetProcessDpiAwareness(int awareness);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetProcessDPIAware();
+
+        private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (IntPtr)(-4);
+        private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = (IntPtr)(-3);
 #endif
 
         [STAThread]
@@ -1187,6 +2025,40 @@ namespace USBAutoCopy
                         if (Environment.OSVersion.Platform == PlatformID.Win32NT)
                         {
                             SetCurrentProcessExplicitAppUserModelID("RS114514.GetRickCourseware");
+
+                            // 优先调用 Windows 10 (1703+) 原生 PerMonitorV2 DPI 感知 API
+                            // 彻底禁用 DWM 双线性位图缩放拉伸，实现 4K 高分屏原生清晰字体渲染
+                            bool dpiSet = false;
+                            try
+                            {
+                                dpiSet = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                                if (!dpiSet)
+                                {
+                                    dpiSet = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                                }
+                            }
+                            catch { }
+
+                            if (!dpiSet)
+                            {
+                                try
+                                {
+                                    // Windows 8.1+ Per-Monitor DPI Aware
+                                    SetProcessDpiAwareness(2);
+                                    dpiSet = true;
+                                }
+                                catch { }
+                            }
+
+                            if (!dpiSet)
+                            {
+                                try
+                                {
+                                    // Windows Vista / 7 System DPI Aware
+                                    SetProcessDPIAware();
+                                }
+                                catch { }
+                            }
                         }
                     }
                     catch { }

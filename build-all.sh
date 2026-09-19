@@ -31,7 +31,7 @@ $CSC_CMD -target:winexe -platform:anycpu -out:publish-win/Rick.exe \
     -win32icon:app.ico -win32manifest:app.manifest \
     -r:System.Windows.Forms.dll -r:System.Drawing.dll -r:System.dll -r:System.Core.dll -r:System.Management.dll -r:System.Data.dll \
     -d:WINDOWS -optimize+ \
-    rick.cs USBMonitor.cs Settings.cs
+    rick.cs USBMonitor.cs Settings.cs BackupHistory.cs
 
 cp -f "$SCRIPT_DIR/publish-win/Rick.exe" "$SCRIPT_DIR/publish-win/获取Rick课件.exe"
 

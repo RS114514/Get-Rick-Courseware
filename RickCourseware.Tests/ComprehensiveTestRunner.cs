@@ -437,6 +437,352 @@ namespace RickCourseware.Tests
                 AssertEqual(25f, font250, "250% Font size");
             });
 
+            // 14. BackupHistory JSON 序列化与复杂字符转义测试
+            RunTest("BackupHistory_JsonSerialization_And_Escaping", () =>
+            {
+                var list = new List<BackupRecord>
+                {
+                    new BackupRecord
+                    {
+                        Id = "uuid-test-1",
+                        Timestamp = new DateTime(2026, 9, 19, 21, 30, 0),
+                        DriveLetter = "D:",
+                        UsbName = "高一\"名校精选\"试卷\\合集",
+                        FileCount = 25,
+                        TargetFolder = @"D:\Courseware\20260919_213000_D_试卷",
+                        Status = "成功"
+                    }
+                };
+
+                string json = BackupHistoryManager.SerializeJson(list);
+                Assert(json.Contains("uuid-test-1"), "JSON has Id");
+                Assert(json.Contains("高一\\\"名校精选\\\"试卷\\\\合集"), "JSON has escaped name");
+
+                var deserialized = BackupHistoryManager.DeserializeJson(json);
+                AssertEqual(1, deserialized.Count, "Deserialized count");
+                AssertEqual("uuid-test-1", deserialized[0].Id, "Record Id");
+                AssertEqual("高一\"名校精选\"试卷\\合集", deserialized[0].UsbName, "Record UsbName");
+                AssertEqual(25, deserialized[0].FileCount, "Record FileCount");
+                AssertEqual(@"D:\Courseware\20260919_213000_D_试卷", deserialized[0].TargetFolder, "Record TargetFolder");
+                AssertEqual("成功", deserialized[0].Status, "Record Status");
+            });
+
+            // 15. BackupHistoryManager 增删改查及文件持久化测试
+            RunTest("BackupHistory_AddUpdateDeleteClear_Persistence", () =>
+            {
+                string tempHist = Path.Combine(Path.GetTempPath(), "CompHistTest_" + Guid.NewGuid().ToString("N") + ".json");
+                BackupHistoryManager.MockFilePath = tempHist;
+                bool notified = false;
+                Action handler = () => { notified = true; };
+                BackupHistoryManager.OnHistoryChanged += handler;
+
+                try
+                {
+                    AssertEqual(0, BackupHistoryManager.LoadHistory().Count, "Initially empty");
+
+                    var rec = new BackupRecord
+                    {
+                        Id = "hist-101",
+                        DriveLetter = "F:",
+                        UsbName = "地理公开课",
+                        FileCount = 8,
+                        TargetFolder = @"C:\Cache\20260919_F_地理公开课",
+                        Status = "本地暂存"
+                    };
+                    BackupHistoryManager.AddRecord(rec);
+                    Assert(notified, "OnHistoryChanged fired");
+                    notified = false;
+
+                    var loaded = BackupHistoryManager.LoadHistory();
+                    AssertEqual(1, loaded.Count, "1 record loaded");
+                    AssertEqual("本地暂存", loaded[0].Status, "Status is local cache");
+
+                    bool updated = BackupHistoryManager.UpdateStatusByFolderName("20260919_F_地理公开课", "已同步", @"\\nas\share\20260919_F_地理公开课");
+                    Assert(updated, "Status update succeeded");
+                    Assert(notified, "OnHistoryChanged fired on update");
+                    notified = false;
+
+                    loaded = BackupHistoryManager.LoadHistory();
+                    AssertEqual("已同步", loaded[0].Status, "Status updated to synced");
+                    AssertEqual(@"\\nas\share\20260919_F_地理公开课", loaded[0].TargetFolder, "Target folder updated");
+
+                    bool deleted = BackupHistoryManager.DeleteRecord("hist-101");
+                    Assert(deleted, "Delete succeeded");
+                    AssertEqual(0, BackupHistoryManager.LoadHistory().Count, "Empty after delete");
+                }
+                finally
+                {
+                    BackupHistoryManager.OnHistoryChanged -= handler;
+                    BackupHistoryManager.MockFilePath = null;
+                    if (File.Exists(tempHist)) File.Delete(tempHist);
+                }
+            });
+
+            // 16. BackupHistory 异常损坏文件自愈容错
+            RunTest("BackupHistory_CorruptedJsonGracefulRecovery", () =>
+            {
+                string tempHist = Path.Combine(Path.GetTempPath(), "CompHistCorrupt_" + Guid.NewGuid().ToString("N") + ".json");
+                BackupHistoryManager.MockFilePath = tempHist;
+
+                try
+                {
+                    File.WriteAllText(tempHist, "NOT A JSON [[[ {{{{ broken string");
+                    var records = BackupHistoryManager.LoadHistory();
+                    AssertEqual(0, records.Count, "Must safely return empty list on corrupt file");
+                }
+                finally
+                {
+                    BackupHistoryManager.MockFilePath = null;
+                    if (File.Exists(tempHist)) File.Delete(tempHist);
+                }
+            });
+
+            // 17. USBMonitor 与 BackupHistory 全链路集成测试
+            RunTest("USBMonitor_BackupHistoryIntegration_OfflineAndSyncFlow", () =>
+            {
+                string tempDir = Path.Combine(Path.GetTempPath(), "CompTest_HistInteg_" + Guid.NewGuid().ToString("N"));
+                string fakeUsb = Path.Combine(tempDir, "USB");
+                string fakeNas = Path.Combine(tempDir, "NAS");
+                string histFile = Path.Combine(tempDir, "hist.json");
+                Directory.CreateDirectory(tempDir);
+                Directory.CreateDirectory(fakeUsb);
+                Directory.CreateDirectory(fakeNas);
+
+                File.WriteAllText(Path.Combine(fakeUsb, "课件讲义.docx"), "讲义数据");
+                BackupHistoryManager.MockFilePath = histFile;
+                USBMonitor.MockIsPathReachableFunc = (p) => false;
+
+                try
+                {
+                    var monitor = new USBMonitor(fakeNas, null);
+                    monitor.ProcessUSBAction(fakeUsb);
+
+                    var history = BackupHistoryManager.LoadHistory();
+                    Assert(history.Count >= 1, "Should have 1 backup record");
+                    AssertEqual("本地暂存", history[0].Status, "First status is local cache");
+
+                    USBMonitor.MockIsPathReachableFunc = (p) => true;
+                    int count = monitor.SyncLocalCacheToNas(fakeNas);
+                    Assert(count >= 1, "Synced folders count >= 1");
+
+                    history = BackupHistoryManager.LoadHistory();
+                    AssertEqual("已同步", history[0].Status, "Status updated to synced");
+                }
+                finally
+                {
+                    USBMonitor.MockIsPathReachableFunc = null;
+                    BackupHistoryManager.MockFilePath = null;
+                    try { Directory.Delete(tempDir, true); } catch { }
+                    string cacheDir = USBMonitor.GetLocalCacheDirectory();
+                    foreach (var d in Directory.GetDirectories(cacheDir))
+                    {
+                        try { Directory.Delete(d, true); } catch { }
+                    }
+                }
+            });
+
+            // 18. DpiScaler 在现代化 UI 多列 ListView 下的等比缩放与高分屏自适应
+            RunTest("DpiScaler_ModernUI_ListViewColumnsScaling", () =>
+            {
+                int[] baseColumns = new int[] { 140, 120, 70, 80, 202 };
+
+                // 200% DPI (4K 常见比例)
+                float scale200 = 2.0f;
+                int[] cols200 = new int[baseColumns.Length];
+                for (int i = 0; i < baseColumns.Length; i++)
+                    cols200[i] = (int)Math.Round(baseColumns[i] * scale200);
+
+                AssertEqual(280, cols200[0], "200% Col 0 Width");
+                AssertEqual(240, cols200[1], "200% Col 1 Width");
+                AssertEqual(140, cols200[2], "200% Col 2 Width");
+                AssertEqual(160, cols200[3], "200% Col 3 Width");
+                AssertEqual(404, cols200[4], "200% Col 4 Width");
+
+                // 300% DPI
+                float scale300 = 3.0f;
+                int col0_300 = (int)Math.Round(baseColumns[0] * scale300);
+                AssertEqual(420, col0_300, "300% Col 0 Width");
+            });
+
+            // 19. BackupRecord DeviceDisplay 组合与空白字符边界测试
+            RunTest("BackupRecord_DeviceDisplay_CombinationsAndWhitespace", () =>
+            {
+                var r1 = new BackupRecord { DriveLetter = "E:", UsbName = "金士顿U盘" };
+                AssertEqual("E: (金士顿U盘)", r1.DeviceDisplay, "Both drive and name");
+
+                var r2 = new BackupRecord { DriveLetter = "F:", UsbName = null };
+                AssertEqual("F:", r2.DeviceDisplay, "Drive only");
+
+                var r3 = new BackupRecord { DriveLetter = null, UsbName = "闪迪课件盘" };
+                AssertEqual("闪迪课件盘", r3.DeviceDisplay, "Name only");
+
+                var r4 = new BackupRecord { DriveLetter = null, UsbName = null };
+                AssertEqual("未知设备", r4.DeviceDisplay, "Neither drive nor name");
+
+                var r5 = new BackupRecord { DriveLetter = "   ", UsbName = "   " };
+                AssertEqual("未知设备", r5.DeviceDisplay, "Whitespace only on both");
+
+                var r6 = new BackupRecord { DriveLetter = " G: ", UsbName = " 语文备课 " };
+                AssertEqual("G: (语文备课)", r6.DeviceDisplay, "Trimmed display");
+            });
+
+            // 20. UpdateStatusByFolderName 精确末级目录匹配与同名后缀隔离
+            RunTest("BackupHistory_UpdateStatusByFolderName_ExactIsolationAndSlashes", () =>
+            {
+                string tempHist = Path.Combine(Path.GetTempPath(), "CompHistIso_" + Guid.NewGuid().ToString("N") + ".json");
+                BackupHistoryManager.MockFilePath = tempHist;
+
+                try
+                {
+                    var rA = new BackupRecord
+                    {
+                        Id = "rec-A",
+                        TargetFolder = @"C:\Cache\20260919_数学课件",
+                        Status = "本地暂存"
+                    };
+                    var rB = new BackupRecord
+                    {
+                        Id = "rec-B",
+                        TargetFolder = @"C:\Cache\20260919_初中数学课件\",
+                        Status = "本地暂存"
+                    };
+                    BackupHistoryManager.AddRecord(rA);
+                    BackupHistoryManager.AddRecord(rB);
+
+                    // 仅更新 "20260919_数学课件"，绝不能误伤 "20260919_初中数学课件"
+                    bool updated = BackupHistoryManager.UpdateStatusByFolderName("20260919_数学课件", "已同步", @"\\nas\20260919_数学课件");
+                    Assert(updated, "Update succeeded for exact folder");
+
+                    var list = BackupHistoryManager.LoadHistory();
+                    var loadedA = list.Find(x => x.Id == "rec-A");
+                    var loadedB = list.Find(x => x.Id == "rec-B");
+
+                    AssertEqual("已同步", loadedA.Status, "Target record updated to 已同步");
+                    AssertEqual("本地暂存", loadedB.Status, "Similar suffix record MUST remain 本地暂存");
+                }
+                finally
+                {
+                    BackupHistoryManager.MockFilePath = null;
+                    if (File.Exists(tempHist)) File.Delete(tempHist);
+                }
+            });
+
+            // 21. ListViewItemComparer 排序测试 (时间戳、数值文件数、文本及正反序)
+            RunTest("ListViewItemComparer_Sorting_Timestamp_NumericCount_Text_Toggle", () =>
+            {
+                var r1 = new BackupRecord
+                {
+                    Id = "1",
+                    Timestamp = new DateTime(2026, 9, 19, 10, 0, 0),
+                    DriveLetter = "A:",
+                    UsbName = "Drive",
+                    FileCount = 2,
+                    Status = "已同步",
+                    TargetFolder = @"C:\A"
+                };
+                var r2 = new BackupRecord
+                {
+                    Id = "2",
+                    Timestamp = new DateTime(2026, 9, 19, 12, 0, 0),
+                    DriveLetter = "B:",
+                    UsbName = "Drive",
+                    FileCount = 10,
+                    Status = "成功",
+                    TargetFolder = @"C:\B"
+                };
+
+                var item1 = new ListViewItem(r1.FormattedTime) { Tag = r1 };
+                item1.SubItems.Add(r1.DeviceDisplay);
+                item1.SubItems.Add($"{r1.FileCount} 个文件");
+                item1.SubItems.Add(r1.Status);
+                item1.SubItems.Add(r1.TargetFolder);
+
+                var item2 = new ListViewItem(r2.FormattedTime) { Tag = r2 };
+                item2.SubItems.Add(r2.DeviceDisplay);
+                item2.SubItems.Add($"{r2.FileCount} 个文件");
+                item2.SubItems.Add(r2.Status);
+                item2.SubItems.Add(r2.TargetFolder);
+
+                // 文件数列 (col 2): 数值排序，2 应小于 10
+                var cmpFileAsc = new ListViewItemComparer(2, true);
+                Assert(cmpFileAsc.Compare(item1, item2) < 0, "2 < 10 in numeric ascending sort");
+
+                var cmpFileDesc = new ListViewItemComparer(2, false);
+                Assert(cmpFileDesc.Compare(item1, item2) > 0, "2 > 10 reversed in descending sort");
+
+                // 时间数列 (col 0): r1 (10:00) < r2 (12:00)
+                var cmpTimeAsc = new ListViewItemComparer(0, true);
+                Assert(cmpTimeAsc.Compare(item1, item2) < 0, "10:00 < 12:00 in time ascending");
+
+                var cmpTimeDesc = new ListViewItemComparer(0, false);
+                Assert(cmpTimeDesc.Compare(item1, item2) > 0, "10:00 > 12:00 reversed in time descending");
+
+                // 回退纯文本解析比较
+                var rawItem1 = new ListViewItem("2026-09-19 10:00:00");
+                rawItem1.SubItems.Add("A");
+                rawItem1.SubItems.Add("2 个文件");
+                var rawItem2 = new ListViewItem("2026-09-19 12:00:00");
+                rawItem2.SubItems.Add("B");
+                rawItem2.SubItems.Add("10 个文件");
+
+                Assert(cmpFileAsc.Compare(rawItem1, rawItem2) < 0, "Fallback string numeric extraction 2 < 10");
+                Assert(cmpTimeAsc.Compare(rawItem1, rawItem2) < 0, "Fallback string datetime parsing 10:00 < 12:00");
+            });
+
+            // 22. BackupHistoryManager 多线程并发操作安全性
+            RunTest("BackupHistory_ConcurrentThreadSafety", () =>
+            {
+                string tempHist = Path.Combine(Path.GetTempPath(), "CompHistConcurr_" + Guid.NewGuid().ToString("N") + ".json");
+                BackupHistoryManager.MockFilePath = tempHist;
+
+                try
+                {
+                    int threadCount = 8;
+                    int itemsPerThread = 10;
+                    var threads = new List<Thread>();
+
+                    for (int t = 0; t < threadCount; t++)
+                    {
+                        int threadIndex = t;
+                        var th = new Thread(() =>
+                        {
+                            for (int i = 0; i < itemsPerThread; i++)
+                            {
+                                BackupHistoryManager.AddRecord(new BackupRecord
+                                {
+                                    Id = $"t{threadIndex}_{i}",
+                                    UsbName = $"Thread_{threadIndex}",
+                                    FileCount = i,
+                                    Status = "成功"
+                                });
+                            }
+                        });
+                        threads.Add(th);
+                    }
+
+                    foreach (var th in threads) th.Start();
+                    foreach (var th in threads) th.Join();
+
+                    var list = BackupHistoryManager.LoadHistory();
+                    AssertEqual(threadCount * itemsPerThread, list.Count, "All concurrent records persisted without loss or corruption");
+                }
+                finally
+                {
+                    BackupHistoryManager.MockFilePath = null;
+                    if (File.Exists(tempHist)) File.Delete(tempHist);
+                }
+            });
+
+            // 清理测试残留文件
+            try
+            {
+                string localIni = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RickConfig.ini");
+                if (File.Exists(localIni)) File.Delete(localIni);
+                string localHist = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BackupHistory.json");
+                if (File.Exists(localHist)) File.Delete(localHist);
+            }
+            catch { }
+
             Console.WriteLine("========================================");
             Console.WriteLine($"测试完成: 共通过 {passed} 项, 失败 {failed} 项。");
             Console.WriteLine("========================================");
