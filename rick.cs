@@ -56,10 +56,6 @@ namespace USBAutoCopy
                     Checked = GetAutoStartStatus()
                 };
                 trayMenu.Items.Add(autoStartMenuItem);
-                trayMenu.Items.Add("测试系统通知", null, (s, e) =>
-                {
-                    ShowNotification("获取Rick课件", "这是一条测试通知，Win10 操作中心与屏幕横幅通知正常！");
-                });
                 trayMenu.Items.Add("-");
                 trayMenu.Items.Add("退出", null, Exit);
                 trayIcon.ContextMenuStrip = trayMenu;
@@ -569,7 +565,7 @@ namespace USBAutoCopy
     {
         private Label lblPath;
         private TextBox txtBackupPath;
-        private Button btnBrowse, btnStart, btnStop, btnTestNotification;
+        private Button btnBrowse, btnStart, btnStop;
         private ListBox lstLog;
         private Label lblStatus;
         private ProgressBar progressBar;
@@ -911,25 +907,6 @@ namespace USBAutoCopy
             btnStop.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#DC2626");
             btnStop.Click += BtnStop_Click;
 
-            btnTestNotification = new Button()
-            {
-                Text = "🔔 测试通知",
-                Location = new Point(355, 82),
-                Size = new Size(95, 32),
-                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
-                ForeColor = ColorTranslator.FromHtml("#334155"),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("微软雅黑", 9f),
-                Cursor = Cursors.Hand
-            };
-            btnTestNotification.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
-            btnTestNotification.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
-            btnTestNotification.Click += (s, e) =>
-            {
-                appContext?.ShowNotification("获取Rick课件", "这是一条测试通知，Win10 系统通知与操作中心功能正常！");
-                AddLog("🔔 已发送系统测试通知，请查看屏幕右下角横幅与操作中心");
-            };
-
             lblDriveInfo = new Label()
             {
                 Text = "💡 插入U盘即自动静默备份；网络离线自动暂存并在恢复后自动同步",
@@ -949,13 +926,12 @@ namespace USBAutoCopy
             chkAutoStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            btnTestNotification.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             lblDriveInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             cardConfig.Controls.AddRange(new Control[] {
                 lblPath, txtBackupPath, btnBrowse,
                 lblDriveSelect, cmbDrives, btnBlockDrive, btnManageBlock,
-                chkAutoStart, btnStart, btnStop, btnTestNotification, lblDriveInfo
+                chkAutoStart, btnStart, btnStop, lblDriveInfo
             });
 
             // 3.2 运行日志卡片 (现代浅灰底，深蓝灰文字)
