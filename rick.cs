@@ -56,6 +56,10 @@ namespace USBAutoCopy
                     Checked = GetAutoStartStatus()
                 };
                 trayMenu.Items.Add(autoStartMenuItem);
+                trayMenu.Items.Add("测试系统通知", null, (s, e) =>
+                {
+                    ShowNotification("获取Rick课件", "这是一条测试通知，Win10 操作中心与屏幕横幅通知正常！");
+                });
                 trayMenu.Items.Add("-");
                 trayMenu.Items.Add("退出", null, Exit);
                 trayIcon.ContextMenuStrip = trayMenu;
@@ -112,13 +116,28 @@ namespace USBAutoCopy
                 lastNotificationMessage = message;
                 lastNotificationTime = DateTime.Now;
 
+                // 1. 触发 WinForms 托盘气泡（作为任务栏右下角伴随提示）
                 if (trayIcon != null)
                 {
-                    trayIcon.BalloonTipTitle = title;
-                    trayIcon.BalloonTipText = message;
-                    trayIcon.BalloonTipIcon = ToolTipIcon.Info;
-                    trayIcon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
+                    try
+                    {
+                        trayIcon.BalloonTipTitle = title;
+                        trayIcon.BalloonTipText = message;
+                        trayIcon.BalloonTipIcon = ToolTipIcon.Info;
+                        trayIcon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
+                    }
+                    catch { }
                 }
+
+                // 2. 触发 Windows 10/11 原生系统 Toast 通知（走 Win10 通知中心与屏幕右下角横幅）
+                try
+                {
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        USBMonitor.ShowWindowsToastNotification(title, message);
+                    }
+                }
+                catch { }
             }
             catch (Exception ex)
             {
@@ -197,10 +216,7 @@ namespace USBAutoCopy
                 {
                     // 绝不弹出主窗口，开机与启动阶段彻底静默
                     mainForm.AddLog("未配置课件保存路径，请双击托盘图标进行设置");
-                    if (sender != null)
-                    {
-                        ShowNotification("获取Rick课件", "未配置保存路径，请双击托盘图标打开主界面设置");
-                    }
+                    ShowNotification("获取Rick课件", "未配置课件保存路径，请双击托盘图标打开主界面设置");
                     return;
                 }
 
@@ -209,11 +225,7 @@ namespace USBAutoCopy
                 isMonitoring = true;
                 mainForm.SetMonitoringStatus(true);
                 UpdateTrayMenuStatus(true);
-                // 静默启动要求：开机和启动阶段彻底静默常驻系统托盘，不弹出提示气泡；仅在用户主动操作时提示
-                if (sender != null)
-                {
-                    ShowNotification("获取Rick课件", "程序已启动常驻后台，正在监控U盘...");
-                }
+                ShowNotification("获取Rick课件", "程序已启动常驻后台，正在监控U盘...");
             }
         }
 
@@ -557,7 +569,7 @@ namespace USBAutoCopy
     {
         private Label lblPath;
         private TextBox txtBackupPath;
-        private Button btnBrowse, btnStart, btnStop;
+        private Button btnBrowse, btnStart, btnStop, btnTestNotification;
         private ListBox lstLog;
         private Label lblStatus;
         private ProgressBar progressBar;
@@ -899,6 +911,25 @@ namespace USBAutoCopy
             btnStop.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#DC2626");
             btnStop.Click += BtnStop_Click;
 
+            btnTestNotification = new Button()
+            {
+                Text = "🔔 测试通知",
+                Location = new Point(355, 82),
+                Size = new Size(95, 32),
+                BackColor = ColorTranslator.FromHtml("#F1F5F9"),
+                ForeColor = ColorTranslator.FromHtml("#334155"),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("微软雅黑", 9f),
+                Cursor = Cursors.Hand
+            };
+            btnTestNotification.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#CBD5E1");
+            btnTestNotification.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            btnTestNotification.Click += (s, e) =>
+            {
+                appContext?.ShowNotification("获取Rick课件", "这是一条测试通知，Win10 系统通知与操作中心功能正常！");
+                AddLog("🔔 已发送系统测试通知，请查看屏幕右下角横幅与操作中心");
+            };
+
             lblDriveInfo = new Label()
             {
                 Text = "💡 插入U盘即自动静默备份；网络离线自动暂存并在恢复后自动同步",
@@ -918,12 +949,13 @@ namespace USBAutoCopy
             chkAutoStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            btnTestNotification.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             lblDriveInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             cardConfig.Controls.AddRange(new Control[] {
                 lblPath, txtBackupPath, btnBrowse,
                 lblDriveSelect, cmbDrives, btnBlockDrive, btnManageBlock,
-                chkAutoStart, btnStart, btnStop, lblDriveInfo
+                chkAutoStart, btnStart, btnStop, btnTestNotification, lblDriveInfo
             });
 
             // 3.2 运行日志卡片 (现代浅灰底，深蓝灰文字)
@@ -2032,6 +2064,7 @@ namespace USBAutoCopy
                         if (Environment.OSVersion.Platform == PlatformID.Win32NT)
                         {
                             SetCurrentProcessExplicitAppUserModelID("RS114514.GetRickCourseware");
+                            EnsureStartMenuShortcut();
 
                             // 优先调用 Windows 10 (1703+) 原生 PerMonitorV2 DPI 感知 API
                             // 彻底禁用 DWM 双线性位图缩放拉伸，实现 4K 高分屏原生清晰字体渲染
@@ -2145,5 +2178,38 @@ namespace USBAutoCopy
             }
             catch { }
         }
+
+#if WINDOWS
+        private static void EnsureStartMenuShortcut()
+        {
+            try
+            {
+                string programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+                if (string.IsNullOrEmpty(programs) || !Directory.Exists(programs)) return;
+
+                string shortcutPath = Path.Combine(programs, "获取Rick课件.lnk");
+                if (File.Exists(shortcutPath)) return;
+
+                string exePath = Application.ExecutablePath;
+                if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath)) return;
+
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType != null)
+                {
+                    object shell = Activator.CreateInstance(shellType);
+                    object shortcut = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
+                    if (shortcut != null)
+                    {
+                        Type scType = shortcut.GetType();
+                        scType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { exePath });
+                        scType.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { Path.GetDirectoryName(exePath) });
+                        scType.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { "获取Rick课件 - 智能备份与同步系统" });
+                        scType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+                    }
+                }
+            }
+            catch { }
+        }
+#endif
     }
 }

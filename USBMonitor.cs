@@ -774,24 +774,33 @@ namespace USBAutoCopy
             {
                 try
                 {
-                    string safeTitle = (title ?? "获取Rick课件").Replace("'", "''").Replace("\"", "`\"");
-                    string safeMsg = (message ?? "").Replace("'", "''").Replace("\"", "`\"");
+                    string finalTitle = string.IsNullOrEmpty(title) ? "获取Rick课件" : title;
+                    string finalMsg = message ?? "";
 
-                    // 使用 Windows 内置注册的 PowerShell AUMID，确保在 Windows 10/11 无需额外预装快捷方式即可稳定展示系统 Toast
+                    // 将标题与内容进行 Base64 编码，彻底避免字符集转义、单双引号、换行及代码页编码问题
+                    string b64Title = Convert.ToBase64String(Encoding.UTF8.GetBytes(finalTitle));
+                    string b64Msg = Convert.ToBase64String(Encoding.UTF8.GetBytes(finalMsg));
+
                     string psScript =
-                        "$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]; " +
+                        "$t = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + b64Title + "')); " +
+                        "$m = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + b64Msg + "')); " +
+                        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; " +
                         "$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); " +
                         "$textNodes = $template.GetElementsByTagName('text'); " +
-                        $"$textNodes.Item(0).AppendChild($template.CreateTextNode('{safeTitle}')) > $null; " +
-                        $"$textNodes.Item(1).AppendChild($template.CreateTextNode('{safeMsg}')) > $null; " +
-                        $"$toast = [Windows.UI.Notifications.ToastNotification]::new($template); " +
+                        "$textNodes.Item(0).AppendChild($template.CreateTextNode($t)) > $null; " +
+                        "$textNodes.Item(1).AppendChild($template.CreateTextNode($m)) > $null; " +
+                        "$toast = New-Object Windows.UI.Notifications.ToastNotification $template; " +
                         "$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'; " +
-                        "try { [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast); } catch { try { [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('RS114514.GetRickCourseware').Show($toast); } catch { } }";
+                        "try { [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast); } catch { " +
+                        "try { [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('RS114514.GetRickCourseware').Show($toast); } catch { " +
+                        "try { [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier().Show($toast); } catch { } } }";
+
+                    string b64Script = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
 
                     var psi = new ProcessStartInfo
                     {
                         FileName = "powershell.exe",
-                        Arguments = $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"{psScript}\"",
+                        Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + b64Script,
                         CreateNoWindow = true,
                         UseShellExecute = false,
                         RedirectStandardOutput = true,
@@ -799,7 +808,7 @@ namespace USBAutoCopy
                     };
                     using (var p = Process.Start(psi))
                     {
-                        p?.WaitForExit(4000);
+                        p?.WaitForExit(5000);
                     }
                 }
                 catch { }
@@ -1184,7 +1193,9 @@ namespace USBAutoCopy
                         }
                         else
                         {
-                            logCallback?.Invoke($"✅ 课件获取完成！共复制 {copiedFiles} 个文件至春晖 NAS 目标目录");
+                            string successMsg = $"课件获取完成！共复制 {copiedFiles} 个文件至春晖 NAS 目标目录";
+                            logCallback?.Invoke($"✅ " + successMsg);
+                            SendNotification("获取Rick课件", successMsg);
                         }
 
                         try
