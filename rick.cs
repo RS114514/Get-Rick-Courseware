@@ -9,7 +9,14 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle("获取Rick课件")]
+[assembly: AssemblyProduct("获取Rick课件")]
+[assembly: AssemblyCompany("RS基金会")]
+[assembly: AssemblyVersion("3.0.0.0")]
+[assembly: AssemblyFileVersion("3.0.0.0")]
 
 namespace USBAutoCopy
 {
@@ -657,9 +664,9 @@ namespace USBAutoCopy
 
             lblAppSubtitle = new Label()
             {
-                Text = "春晖中学课件智能备份与同步系统",
+                Text = "春晖中学课件智能备份与同步系统 v3.0",
                 Location = new Point(60, 36),
-                Size = new Size(260, 18),
+                Size = new Size(280, 18),
                 Font = new Font("微软雅黑", 8.5f, FontStyle.Regular),
                 ForeColor = ColorTranslator.FromHtml("#64748B")
             };

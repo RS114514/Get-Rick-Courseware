@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="USBAutoCopy.MainWindow"
-        Title="获取Rick课件 v2.5" Width="700" Height="680"
+        Title="获取Rick课件 v3.0" Width="700" Height="680"
         WindowStartupLocation="CenterScreen">
     
     <Grid Margin="20" RowDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto">
